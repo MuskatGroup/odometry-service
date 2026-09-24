@@ -18,7 +18,8 @@ jobs:
       - uses: actions/setup-node@v4
         with: {node-version: "22"}
       - uses: astral-sh/setup-uv@v6
-      - run: dotnet build apps/api/Odometry.Api.csproj --locked-mode
+      - run: dotnet restore apps/api/Odometry.Api.csproj --locked-mode
+      - run: dotnet build apps/api/Odometry.Api.csproj --no-restore
       - run: uv sync --locked --python 3.10
       - run: uv run pytest -q tests/test_api.py
         env: {RUN_API_TESTS: "1"}
