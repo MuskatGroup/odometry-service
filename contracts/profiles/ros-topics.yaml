@@ -1,0 +1,10 @@
+topics:
+  - name: /external/control
+    type: odometry_msgs/msg/ControlSample
+    kind: control
+    profile: ros-events.yaml
+  - name: /external/wheel_speed
+    type: odometry_msgs/msg/WheelSample
+    kind: wheel
+    profile: ros-events.yaml
+    qos: sensor

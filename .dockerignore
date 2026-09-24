@@ -1,0 +1,13 @@
+.git
+.cache
+.venv
+**/node_modules
+**/dist
+**/bin
+**/obj
+**/__pycache__
+artifacts
+data
+ros2_ws/build
+ros2_ws/install
+ros2_ws/log

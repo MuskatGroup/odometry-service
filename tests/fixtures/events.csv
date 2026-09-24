@@ -1,0 +1,7 @@
+kind,stamp_ns,seq,u,valid,wheel_id,speed_mps
+control,0,0,0,true,,
+wheel,0,0,,true,left,10
+control,100000000,1,0,true,,
+wheel,100000000,1,,true,left,10
+control,200000000,2,0,true,,
+wheel,200000000,2,,true,left,10

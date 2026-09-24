@@ -216,3 +216,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Odometry workspace
+node_modules/
+bin/
+obj/
+artifacts/
+data/
+ros2_ws/install/
+ros2_ws/log/

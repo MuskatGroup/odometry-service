@@ -1,0 +1,11 @@
+version: "0.1"
+layout: events
+time: {field: stamp_ns, unit: ns, clock: system}
+seq_field: seq
+valid_field: valid
+kind_field: kind
+wheel_id_field: wheel_id
+control: {field: u, mapping: linear, scale: 1}
+wheels:
+  - {id: left, field: speed_mps, unit: m/s}
+  - {id: right, field: speed_mps, unit: m/s}
