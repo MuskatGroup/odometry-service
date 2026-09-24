@@ -1,0 +1,18 @@
+{
+  "inputs": [
+    {"topic": "/tram/control", "type": "odometry_msgs/msg/ControlSample", "qos": "reliable"},
+    {"topic": "/tram/wheel_speed", "type": "odometry_msgs/msg/WheelSample", "qos": "best_effort"}
+  ],
+  "profile": {
+    "schema_version": "adapter-1",
+    "source_id": "ros",
+    "control": {"field": "u", "topic": "/tram/control", "valid_field": "valid"},
+    "channels": [
+      {"id": "wheel", "field": "speed_mps", "unit": "m/s", "topic": "/tram/wheel_speed", "valid_field": "valid"}
+    ]
+  },
+  "estimator": {"type": "model", "config": {}},
+  "stamp_source": "header",
+  "reorder_ms": 20,
+  "output": {"frame_id": "odom_1d", "child_frame_id": "tram_1d", "rate_hz": 50}
+}

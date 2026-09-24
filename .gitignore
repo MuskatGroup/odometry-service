@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local results and ROS 2 workspace artifacts
+work/
+ros2_ws/install/
+ros2_ws/log/

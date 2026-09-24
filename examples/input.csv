@@ -1,0 +1,10 @@
+time_s,seq,handle,speed_left,speed_right
+0.00,0,traction,36,36
+0.25,1,traction,36,36
+0.50,2,coast,36,36
+0.75,3,coast,,
+1.00,4,coast,,
+1.25,5,coast,,
+1.50,6,coast,,
+1.75,7,coast,36,36
+2.00,8,brake,36,36

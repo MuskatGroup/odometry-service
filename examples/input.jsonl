@@ -1,0 +1,9 @@
+{"time_s":"0.00","seq":0,"handle":"traction","speed_left":36,"speed_right":36}
+{"time_s":"0.25","seq":1,"handle":"traction","speed_left":36,"speed_right":36}
+{"time_s":"0.50","seq":2,"handle":"coast","speed_left":36,"speed_right":36}
+{"time_s":"0.75","seq":3,"handle":"coast","speed_left":null,"speed_right":null}
+{"time_s":"1.00","seq":4,"handle":"coast","speed_left":null,"speed_right":null}
+{"time_s":"1.25","seq":5,"handle":"coast","speed_left":null,"speed_right":null}
+{"time_s":"1.50","seq":6,"handle":"coast","speed_left":null,"speed_right":null}
+{"time_s":"1.75","seq":7,"handle":"coast","speed_left":36,"speed_right":36}
+{"time_s":"2.00","seq":8,"handle":"brake","speed_left":36,"speed_right":36}

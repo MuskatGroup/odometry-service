@@ -1,0 +1,12 @@
+{
+  "schema_version": "adapter-1",
+  "source_id": "synthetic-emulator",
+  "timestamp": {"field": "stamp_ns", "unit": "ns"},
+  "seq_field": "seq",
+  "control": {"field": "control"},
+  "channels": [
+    {"id": "left", "field": "speeds.0", "unit": "m/s", "missing": "skip"},
+    {"id": "right", "field": "speeds.1", "unit": "m/s", "missing": "skip"}
+  ],
+  "fusion": {"strategy": "median", "variance_floor": 0.25}
+}

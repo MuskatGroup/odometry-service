@@ -1,0 +1,12 @@
+{
+  "schema_version": "adapter-1",
+  "source_id": "fixture",
+  "timestamp": {"field": "time_s", "unit": "s"},
+  "seq_field": "seq",
+  "control": {"field": "handle", "mapping": {"traction": 0.6, "coast": 0, "brake": -0.4}},
+  "channels": [
+    {"id": "left", "field": "speed_left", "unit": "km/h", "missing": "skip"},
+    {"id": "right", "field": "speed_right", "unit": "km/h", "missing": "skip"}
+  ],
+  "fusion": {"strategy": "median", "variance_floor": 0.25}
+}

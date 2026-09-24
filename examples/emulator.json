@@ -1,0 +1,10 @@
+{
+  "seed": 17,
+  "steps": 400,
+  "step_ns": "50000000",
+  "channels": 2,
+  "initial_speed_mps": 5,
+  "noise_mps": 0.02,
+  "dropout_steps": [120, 150],
+  "slip_steps": [220, 240]
+}
