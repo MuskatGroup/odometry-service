@@ -137,12 +137,19 @@ def normalize_message(
 
     if topic in GNSS_VELOCITY_TOPICS:
         linear = message.twist.linear
+        angular = message.twist.angular
         velocity_x = float(linear.x)
         velocity_y = float(linear.y)
         velocity_z = float(linear.z)
+        angular_x = float(angular.x)
+        angular_y = float(angular.y)
+        angular_z = float(angular.z)
 
         components_finite = all(
             math.isfinite(value) for value in (velocity_x, velocity_y, velocity_z)
+        )
+        angular_components_finite = all(
+            math.isfinite(value) for value in (angular_x, angular_y, angular_z)
         )
         return {
             **common,
@@ -152,6 +159,10 @@ def normalize_message(
             "velocity_x_mps": finite_number(velocity_x),
             "velocity_y_mps": finite_number(velocity_y),
             "velocity_z_mps": finite_number(velocity_z),
+            "angular_components_finite": angular_components_finite,
+            "angular_x_radps": finite_number(angular_x),
+            "angular_y_radps": finite_number(angular_y),
+            "angular_z_radps": finite_number(angular_z),
             "horizontal_speed_mps": (
                 math.hypot(velocity_x, velocity_y) if components_finite else None
             ),

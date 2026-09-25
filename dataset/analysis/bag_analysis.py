@@ -14,7 +14,9 @@ import numpy as np
 import pandas as pd
 import yaml
 from pyproj import CRS, Transformer
-from read_bag import DATA_ROOT, iter_records, resolve_bag_path
+from read_bag import DATA_ROOT, create_typestore, iter_records, resolve_bag_path
+from rosbags.highlevel import AnyReader
+from rosbags.interfaces.typing import Nodetype
 
 TOPIC_COLUMNS = {
     "/vehicle/driver_position_cmd": "control_count",
@@ -25,6 +27,39 @@ TOPIC_COLUMNS = {
     "/sensing/gnss/rover/fix": "rover_fix_count",
     "/sensing/gnss/rover/vel": "rover_velocity_count",
 }
+
+RECORD_COLUMNS = [
+    "topic",
+    "recorded_ns",
+    "header_ns",
+    "recording_delay_ns",
+    "frame_id",
+    "kind",
+    "position",
+    "wheel_id",
+    "velocity_mps",
+    "velocity_finite",
+    "receiver",
+    "status",
+    "service",
+    "has_fix",
+    "coordinates_finite",
+    "latitude_deg",
+    "longitude_deg",
+    "altitude_m",
+    "position_covariance",
+    "position_covariance_type",
+    "velocity_components_finite",
+    "velocity_x_mps",
+    "velocity_y_mps",
+    "velocity_z_mps",
+    "angular_components_finite",
+    "angular_x_radps",
+    "angular_y_radps",
+    "angular_z_radps",
+    "horizontal_speed_mps",
+    "speed_3d_mps",
+]
 
 
 @dataclass(frozen=True)
@@ -104,6 +139,63 @@ def scan_dataset(data_root: Path = DATA_ROOT) -> pd.DataFrame:
     )
 
 
+def _field_type_name(descriptor: tuple[Any, Any]) -> str:
+    node, value = descriptor
+    if node == Nodetype.BASE:
+        return str(value[0])
+    if node == Nodetype.NAME:
+        return str(value)
+    if node == Nodetype.ARRAY:
+        child, length = value
+        return f"{_field_type_name(child)}[{length}]"
+    if node == Nodetype.SEQUENCE:
+        child, length = value
+        suffix = "" if length == 0 else f"<={length}"
+        return f"sequence<{_field_type_name(child)}>{suffix}"
+    return str(value)
+
+
+def _flatten_type_fields(
+    typestore: Any,
+    message_type: str,
+    prefix: str = "",
+) -> list[tuple[str, str]]:
+    fields: list[tuple[str, str]] = []
+    for field_name, descriptor in typestore.fielddefs[message_type][1]:
+        path = f"{prefix}.{field_name}" if prefix else field_name
+        node, nested_type = descriptor
+        if node == Nodetype.NAME and nested_type in typestore.fielddefs:
+            fields.extend(_flatten_type_fields(typestore, nested_type, path))
+        else:
+            fields.append((path, _field_type_name(descriptor)))
+    return fields
+
+
+def bag_topic_schema(bag: str | Path) -> pd.DataFrame:
+    """List every topic and recursively expanded ROS message field."""
+    bag_path = resolve_bag_path(str(bag))
+    if not bag_path.is_dir():
+        raise FileNotFoundError(f"Bag directory not found: {bag_path}")
+
+    typestore = create_typestore()
+    rows: list[dict[str, Any]] = []
+    with AnyReader([bag_path], default_typestore=typestore) as reader:
+        for connection in sorted(reader.connections, key=lambda item: item.topic):
+            for field, field_type in _flatten_type_fields(
+                typestore, connection.msgtype
+            ):
+                rows.append(
+                    {
+                        "topic": connection.topic,
+                        "message_type": connection.msgtype,
+                        "message_count": connection.msgcount,
+                        "field": field,
+                        "field_type": field_type,
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
 def _add_time_columns(records: pd.DataFrame, origin_ns: int) -> pd.DataFrame:
     result = records.copy()
     result["time_s"] = (result["header_ns"] - origin_ns) / 1e9
@@ -159,7 +251,7 @@ def add_local_gnss_coordinates(
 def load_bag_frames(bag: str | Path) -> BagFrames:
     """Decode one bag and split it into analysis-ready dataframes."""
     bag_path = resolve_bag_path(str(bag))
-    records = pd.DataFrame(iter_records(bag_path))
+    records = pd.DataFrame(iter_records(bag_path)).reindex(columns=RECORD_COLUMNS)
     if records.empty:
         raise ValueError(f"No supported messages found in {bag_path}")
 
@@ -192,9 +284,11 @@ def stream_timing_summary(frames: BagFrames) -> pd.DataFrame:
     records.loc[records["kind"] == "wheel_velocity", "stream"] += (
         ":" + records.loc[records["kind"] == "wheel_velocity", "wheel_id"]
     )
-    records.loc[records["kind"].str.startswith("gnss"), "stream"] += (
-        ":" + records.loc[records["kind"].str.startswith("gnss"), "receiver"]
-    )
+    gnss_mask = records["kind"].str.startswith("gnss")
+    if gnss_mask.any():
+        records.loc[gnss_mask, "stream"] += (
+            ":" + records.loc[gnss_mask, "receiver"]
+        )
 
     rows: list[dict[str, Any]] = []
     for stream, group in records.groupby("stream", sort=True):
