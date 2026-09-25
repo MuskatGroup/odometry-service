@@ -32,6 +32,16 @@ uv sync --group dev --group analysis
 uv run --group analysis jupyter lab dataset/analysis
 ```
 
+## Ноутбуки
+
+- `analysis.ipynb` читает только `metadata.yaml` всех bag и предназначен для
+  быстрой инвентаризации, выбора прогонов и поиска кандидатов в дубликаты.
+- `explore_bag.ipynb` декодирует один выбранный bag и строит подробные графики
+  управления, колёс, GNSS, времени и диагностических расхождений.
+
+Общие преобразования находятся в `bag_analysis.py`, а низкоуровневое чтение
+ROS 2 bag — в `read_bag.py`. Не копируйте десериализацию заново в notebook.
+
 ## Проверка окружения в notebook
 
 ```python
