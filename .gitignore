@@ -151,6 +151,8 @@ activemq-data/
 .env
 .envrc
 .venv
+.venv-analysis/
+dataset/analysis/requirements.txt
 env/
 venv/
 ENV/

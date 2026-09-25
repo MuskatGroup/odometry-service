@@ -1,3 +1,5 @@
 {
-  "cmake.sourceDirectory": "C:/Users/vladm/Documents/Git/odometry-service/dataset/tram_vehicle_msgs"
+  "cmake.sourceDirectory": "C:/Users/vladm/Documents/Git/odometry-service/dataset/tram_vehicle_msgs",
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe",
+  "python.terminal.activateEnvironment": true
 }
