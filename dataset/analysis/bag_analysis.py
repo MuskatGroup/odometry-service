@@ -139,6 +139,38 @@ def scan_dataset(data_root: Path = DATA_ROOT) -> pd.DataFrame:
     )
 
 
+def dataset_topic_inventory(data_root: Path = DATA_ROOT) -> pd.DataFrame:
+    """List every ROS topic found across all bag metadata files."""
+    rows: list[dict[str, Any]] = []
+    for metadata_path in sorted(data_root.glob("*/metadata.yaml")):
+        payload = yaml.safe_load(metadata_path.read_text(encoding="utf-8"))
+        info = payload["rosbag2_bagfile_information"]
+        for entry in info.get("topics_with_message_count", []):
+            metadata = entry["topic_metadata"]
+            rows.append(
+                {
+                    "bag_id": metadata_path.parent.name,
+                    "topic": metadata["name"],
+                    "message_type": metadata["type"],
+                    "message_count": int(entry.get("message_count", 0)),
+                }
+            )
+
+    topics = pd.DataFrame(rows)
+    if topics.empty:
+        raise ValueError(f"No topics found under {data_root}")
+    return (
+        topics.groupby(["topic", "message_type"], as_index=False)
+        .agg(
+            declared_bags=("bag_id", "nunique"),
+            nonempty_bags=("message_count", lambda values: int(values.gt(0).sum())),
+            total_messages=("message_count", "sum"),
+        )
+        .sort_values("topic")
+        .reset_index(drop=True)
+    )
+
+
 def _field_type_name(descriptor: tuple[Any, Any]) -> str:
     node, value = descriptor
     if node == Nodetype.BASE:
