@@ -26,7 +26,7 @@ def test_ros_and_bag_match_offline(tmp_path):
     for i in range(101):
         stamp = i * 20_000_000
         events += [ControlSample(stamp, i, 0), WheelSample(stamp, i, "left", 10)]
-    expected, _ = run_events(events)
+    expected, _ = run_events(events, estimator_name="adaptive-ekf")
     rclpy.init()
     node = Node("integration_source")
     estimator = EstimatorNode()
@@ -64,7 +64,7 @@ def test_ros_and_bag_match_offline(tmp_path):
             # Record at the intended 50 Hz, so playback is not an artificial burst.
             executor.spin_once(timeout_sec=0.02)
         assert received[-1].s_m == pytest.approx(expected[-1]["s_m"])
-        assert not received[-1].uncertainty_available
+        assert received[-1].uncertainty_available
         recorder.send_signal(signal.SIGINT)
         recorder.wait(timeout=10)
         executor.remove_node(estimator)

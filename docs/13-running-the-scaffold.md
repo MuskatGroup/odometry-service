@@ -2,13 +2,13 @@
 
 ## Что реализовано
 
-В одном репозитории работают: transport-independent Python-ядро с baseline `wheel-hold-v1`, профили и адаптеры CSV/JSON/JSONL/WebSocket, ROS-адаптер, replay, Failure Lab, HTTP/SignalR API и Vue.
+В одном репозитории работают: transport-independent Python-ядро с baseline `wheel-hold-v1` и `ekf-robust-v1`, профили и адаптеры CSV/JSON/JSONL/WebSocket, ROS-адаптер, replay, Failure Lab, HTTP/SignalR API и Vue.
 
-Это инфраструктура для разработки алгоритма. EKF, адаптация, ML-классификатор и доказанная точность резервной оценки пока **не реализованы**. Нулевая колесная скорость используется baseline как измерение: защиты от юза у этого сравнительного алгоритма пока нет.
+Рабочий EKF использует состояние `[s, v, a_act, d]`, нелинейную модель тяги/торможения, NIS-гейт, поканальное голосование, детектор зависания, гистерезис возврата и повторный захват. Адаптация возмущения доступна экспериментальным переключателем, но по умолчанию отключена. Автокалибровка параметров, ML-классификатор и доказанная точность на реальном трамвае пока **не реализованы**.
 
 Baseline использует медиану свежих каналов, затем удерживает скорость до тайм-аута качества. Продолжение численного прогноза с `valid=false` предназначено для анализа ошибок, а не использования в управлении. `FUSED` в этом baseline означает наличие свежих колес и управления; это не заявление о работающем EKF.
 
-Неопределенность отсутствует: `uncertainty_available=false`, значения sigma/covariance в JSON равны null. ROS публикует `/odometry/estimate` и диагностику; `/odometry/filtered` начнет публиковаться при подключении оценивателя с пригодной ковариацией.
+Baseline не публикует неопределенность. EKF публикует `sigma` и ковариацию 4×4 с обязательным признаком `UNCERTAINTY_UNCALIBRATED`. ROS публикует `/odometry/estimate`, диагностику и совместимое `/odometry/filtered` для действительной EKF-оценки.
 
 ## Быстрый запуск всей демонстрации
 
@@ -45,14 +45,22 @@ uv run ruff check python tests ros2_ws/src/odometry_node
 
 ```bash
 uv run odometry-lab generate --output artifacts/experiment --fault slip
-uv run odometry-lab run --source artifacts/experiment/events.jsonl --profile contracts/profiles/events.yaml --output artifacts/experiment --run-id experiment-001
-uv run odometry-lab evaluate --estimates artifacts/experiment/estimates.jsonl --truth artifacts/experiment/truth.jsonl --output artifacts/experiment/report.json
+uv run odometry-lab run --source artifacts/experiment/events.jsonl --profile contracts/profiles/events.yaml --output artifacts/experiment --run-id experiment-001 --estimator adaptive-ekf
+uv run odometry-lab evaluate --estimates artifacts/experiment/estimates.jsonl --truth artifacts/experiment/truth.jsonl --faults artifacts/experiment/faults.jsonl --output artifacts/experiment/report.json
 uv run odometry-lab import-report --directory artifacts/experiment --api http://localhost:8080
 ```
 
 Без `--truth` evaluator возвращает null для фактических ошибок и причину `NO_INDEPENDENT_TRUTH`. Разделение train/test и идентификация модели относятся к следующему этапу DS.
 
-Генератор поддерживает `none|slip|slide|freeze|dropout`, `--seed`, `--duration`, `--fault-start`, `--fault-end`. Интервал отказа должен находиться внутри длительности. Для slip/slide меняется также эффективное ускорение симулятора. Это упрощенная синтетическая физика.
+Генератор поддерживает измерительные `slip|common_slip|slide|lock|freeze|dropout|scale`, физические `grade|traction_scale` и комбинированный `grade_in_dropout` отказы, `--seed`, `--duration`, `--fault-start`, `--fault-end`, `--wheels`. Физика включает лаг привода. Разметка сохраняется в `faults.jsonl` и не поступает в оцениватель.
+
+Сравнение B0/B1/B2/M1/M2 на сценариях запускается так:
+
+```bash
+uv run odometry-lab benchmark --output artifacts/benchmark --seeds 17,23
+```
+
+Результаты — `benchmark.json`, `benchmark.md` и отдельные отчеты. Это синтетический regression benchmark, а не доказательство точности.
 
 ## Подключение файлов
 
@@ -62,6 +70,14 @@ uv run odometry-lab run --source tests/fixtures/events.json --profile contracts/
 ```
 
 `events.yaml` описывает строки отдельных событий. `wide.yaml` — строки с ручкой и несколькими колесами, включая преобразование km/h и RPM.
+
+Для неизвестного файла можно получить черновик профиля:
+
+```bash
+uv run odometry-lab probe sample.csv --output artifacts/profile-draft.yaml
+```
+
+`probe` не утверждает, что угадал единицы или шкалу времени: созданный YAML содержит предупреждения `REVIEW_REQUIRED` и должен быть проверен человеком.
 
 Профиль определяет поля через пути `outer.inner.0.value`, временные единицы ns/us/ms/s/ros, явный `offset_ns`, кодировку ручки и колеса. JSON-объект с вложенным массивом поддерживается через `records_path`. В CSV доступен `delimiter`. Отсутствующий отсчет не заменяется нулем.
 
@@ -171,4 +187,4 @@ RUN_API_TESTS=1 uv run pytest -q tests/test_api.py
 
 ## Следующий шаг команды
 
-DS заменяет baseline через существующий API; автоматизатор добавляет независимые сценарии и проверку доверия. Архитектор подключает формат организаторов. Backend/frontend уже могут развиваться на сохраненных отчетах и SignalR независимо от алгоритма. Rust, ML, LLM и управление запуском из UI остаются вне этого этапа.
+DS калибрует параметры EKF и сравнивает его с baseline на реальных данных; автоматизатор расширяет независимые сценарии и проверку доверия. Архитектор подключает формат организаторов. Backend/frontend могут развиваться на сохраненных отчетах и SignalR независимо от алгоритма. Rust, ML, LLM и управление запуском из UI остаются вне этого этапа.

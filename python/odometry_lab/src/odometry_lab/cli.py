@@ -7,8 +7,10 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 
 import websockets
-from odometry_io import load_profile
+from odometry_core import ModelConfig
+from odometry_io import load_profile, write_probe
 
+from .benchmark import PRESETS, SCENARIOS, benchmark
 from .evaluate import evaluate
 from .runner import run
 from .scenario import generate
@@ -70,10 +72,27 @@ def main():
     gen = commands.add_parser("generate")
     gen.add_argument("--output", required=True)
     gen.add_argument("--seed", type=int, default=42)
-    gen.add_argument("--fault", choices=["none", "slip", "slide", "freeze", "dropout"], default="dropout")
+    gen.add_argument(
+        "--fault",
+        choices=[
+            "none",
+            "slip",
+            "common_slip",
+            "slide",
+            "lock",
+            "freeze",
+            "dropout",
+            "scale",
+            "grade",
+            "grade_in_dropout",
+            "traction_scale",
+        ],
+        default="dropout",
+    )
     gen.add_argument("--duration", type=float, default=20)
     gen.add_argument("--fault-start", type=float, default=8)
     gen.add_argument("--fault-end", type=float, default=11)
+    gen.add_argument("--wheels", type=int, default=2)
     execute = commands.add_parser("run")
     execute.add_argument("--source", required=True)
     execute.add_argument("--profile", required=True)
@@ -81,9 +100,12 @@ def main():
     execute.add_argument("--run-id", default="demo-001")
     execute.add_argument("--tail", type=float, default=0)
     execute.add_argument("--duration", type=float, default=20, help="Live source observation duration")
+    execute.add_argument("--estimator", choices=["wheel-hold", "adaptive-ekf"], default="adaptive-ekf")
+    execute.add_argument("--model-config", help="JSON file overriding adaptive EKF parameters")
     score = commands.add_parser("evaluate")
     score.add_argument("--estimates", required=True)
     score.add_argument("--truth")
+    score.add_argument("--faults", help="Optional JSONL fault-window annotations")
     score.add_argument("--output", required=True)
     upload = commands.add_parser("import-report")
     upload.add_argument("--directory", required=True)
@@ -99,13 +121,40 @@ def main():
     demo.add_argument("--output", default="artifacts/demo")
     demo.add_argument("--profile", default="contracts/profiles/events.yaml")
     demo.add_argument("--api")
+    demo.add_argument("--estimator", choices=["wheel-hold", "adaptive-ekf"], default="adaptive-ekf")
+    inspect = commands.add_parser("probe", help="Build a review-required source profile draft")
+    inspect.add_argument("source")
+    inspect.add_argument("--output", required=True)
+    inspect.add_argument("--limit", type=int, default=200)
+    bench = commands.add_parser("benchmark")
+    bench.add_argument("--output", required=True)
+    bench.add_argument("--profile", default="contracts/profiles/events.yaml")
+    bench.add_argument("--seeds", default="17", help="Comma-separated integer seeds")
+    bench.add_argument("--scenario", action="append", choices=SCENARIOS)
+    bench.add_argument("--preset", action="append", choices=tuple(PRESETS))
     args = parser.parse_args()
     if args.command == "generate":
-        generate(args.output, args.seed, args.duration, args.fault, args.fault_start, args.fault_end)
+        generate(
+            args.output, args.seed, args.duration, args.fault, args.fault_start, args.fault_end, args.wheels
+        )
     elif args.command == "run":
-        run(args.source, load_profile(args.profile), args.output, args.run_id, args.tail, args.duration)
+        model_config = None
+        if args.model_config:
+            model_config = ModelConfig.from_dict(
+                json.loads(Path(args.model_config).read_text(encoding="utf-8"))
+            )
+        run(
+            args.source,
+            load_profile(args.profile),
+            args.output,
+            args.run_id,
+            args.tail,
+            args.duration,
+            args.estimator,
+            model_config,
+        )
     elif args.command == "evaluate":
-        evaluate(args.estimates, args.truth, args.output)
+        evaluate(args.estimates, args.truth, args.output, args.faults)
     elif args.command == "import-report":
         import_report(args.directory, args.api)
     elif args.command == "serve-ws":
@@ -113,10 +162,27 @@ def main():
     elif args.command == "demo":
         folder = Path(args.output)
         generate(folder)
-        run(str(folder / "events.jsonl"), load_profile(args.profile), folder, "demo-001")
-        evaluate(folder / "estimates.jsonl", folder / "truth.jsonl", folder / "report.json")
+        run(
+            str(folder / "events.jsonl"),
+            load_profile(args.profile),
+            folder,
+            "demo-001",
+            estimator_name=args.estimator,
+        )
+        evaluate(
+            folder / "estimates.jsonl",
+            folder / "truth.jsonl",
+            folder / "report.json",
+            folder / "faults.jsonl",
+        )
         if args.api:
             import_report(folder, args.api)
+    elif args.command == "probe":
+        result = write_probe(args.source, args.output, args.limit)
+        print("Warnings:", *result["warnings"], sep="\n- ")
+    elif args.command == "benchmark":
+        seeds = tuple(int(value) for value in args.seeds.split(","))
+        benchmark(args.output, args.profile, seeds, args.scenario or SCENARIOS, args.preset or tuple(PRESETS))
     print("Completed:", args.command)
 
 

@@ -3,7 +3,13 @@ import time
 import rclpy
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from nav_msgs.msg import Odometry
-from odometry_core import EstimatorConfig, InitialState, OdometryEstimator
+from odometry_core import (
+    AdaptiveOdometryEstimator,
+    EstimatorConfig,
+    InitialState,
+    ModelConfig,
+    OdometryEstimator,
+)
 from odometry_msgs.msg import ControlSample, InputBatch, LongitudinalEstimate, WheelSample
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -20,7 +26,13 @@ class EstimatorNode(Node):
         self.declare_parameter("processing_delay_ms", 20.0)
         self.declare_parameter("initial_s_m", 0.0)
         self.declare_parameter("initial_v_mps", 0.0)
-        self.estimator = OdometryEstimator()
+        self.declare_parameter("estimator", "adaptive-ekf")
+        estimator_name = self.get_parameter("estimator").value
+        if estimator_name not in ("wheel-hold", "adaptive-ekf"):
+            raise ValueError("estimator must be wheel-hold or adaptive-ekf")
+        self.estimator_name = estimator_name
+        self.estimator = (AdaptiveOdometryEstimator() if estimator_name == "adaptive-ekf"
+                          else OdometryEstimator())
         self.epoch = 0
         self.last_stamp = None
         self.last_clock = None
@@ -42,7 +54,7 @@ class EstimatorNode(Node):
             InitialState(
                 stamp, self.get_parameter("initial_s_m").value, self.get_parameter("initial_v_mps").value
             ),
-            EstimatorConfig(),
+            ModelConfig() if self.estimator_name == "adaptive-ekf" else EstimatorConfig(),
         )
 
     def event(self, msg):
@@ -112,7 +124,7 @@ class EstimatorNode(Node):
         array = DiagnosticArray()
         array.header = msg.header
         status = DiagnosticStatus()
-        status.name, status.hardware_id = "odometry", "baseline"
+        status.name, status.hardware_id = "odometry", result.model_version
         status.level = DiagnosticStatus.WARN if result.valid else DiagnosticStatus.ERROR
         status.message = result.mode
         status.values = [

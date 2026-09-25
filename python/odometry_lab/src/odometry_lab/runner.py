@@ -1,13 +1,32 @@
 import asyncio
+import math
 import time
 from dataclasses import asdict
 from pathlib import Path
 
-from odometry_core import ControlSample, EstimatorConfig, InitialState, OdometryEstimator
+from odometry_core import (
+    AdaptiveOdometryEstimator,
+    ControlSample,
+    EstimatorConfig,
+    InitialState,
+    ModelConfig,
+    OdometryEstimator,
+)
 from odometry_core.types import event_dict
 from odometry_io import Normalizer, read_file, websocket_records
 
 from .storage import write_json, write_rows
+
+
+def _percentile(values, quantile):
+    values = sorted(value for value in values if value is not None)
+    if not values:
+        return None
+    position = (len(values) - 1) * quantile
+    left, right = math.floor(position), math.ceil(position)
+    return (
+        values[left] if left == right else values[left] + (values[right] - values[left]) * (position - left)
+    )
 
 
 def ingest(estimator, event):
@@ -17,14 +36,25 @@ def ingest(estimator, event):
         estimator.ingest_wheel(event)
 
 
-def run_events(events, initial=None, config=None, hz=50, tail_s=0.0):
+def create_estimator(name="wheel-hold", model_config=None):
+    if name == "wheel-hold":
+        if model_config is not None:
+            raise ValueError("model_config is only valid for adaptive-ekf")
+        return OdometryEstimator(), EstimatorConfig()
+    if name == "adaptive-ekf":
+        config = model_config or ModelConfig()
+        return AdaptiveOdometryEstimator(config), config
+    raise ValueError(f"Unknown estimator: {name}")
+
+
+def run_events(events, initial=None, config=None, hz=50, tail_s=0.0, estimator_name="wheel-hold"):
     if not events:
         raise ValueError("No usable input events")
     if hz <= 0 or tail_s < 0:
         raise ValueError("Invalid run frequency/tail")
     initial = initial or InitialState(events[0].stamp_ns)
-    config = config or EstimatorConfig()
-    estimator = OdometryEstimator()
+    estimator, default_config = create_estimator(estimator_name, config)
+    config = config or default_config
     estimator.initialize(initial, config)
     period = round(1e9 / hz)
     if period < 1:
@@ -49,10 +79,16 @@ def run_events(events, initial=None, config=None, hz=50, tail_s=0.0):
         frame = estimator.advance_to(endpoint).to_dict()
         frame["compute_ms"] = None
         output.append(frame)
-    return output, dict(estimator.counts)
+    if hasattr(estimator, "counts"):
+        counts = dict(estimator.counts)
+    else:
+        counts = {"accepted_wheels": estimator.accepted, "rejected_wheels": estimator.rejected}
+    return output, counts
 
 
-async def run_websocket(url, normalizer, duration_s=20, hz=50):
+async def run_websocket(
+    url, normalizer, duration_s=20, hz=50, estimator_name="wheel-hold", model_config=None
+):
     if duration_s <= 0 or hz <= 0:
         raise ValueError("Invalid live duration/frequency")
     queue = asyncio.Queue(maxsize=4096)
@@ -72,7 +108,7 @@ async def run_websocket(url, normalizer, duration_s=20, hz=50):
             diagnostics["SOURCE_DISCONNECTED"] += 1
 
     task = asyncio.create_task(receive())
-    estimator = OdometryEstimator()
+    estimator, estimator_config = create_estimator(estimator_name, model_config)
     start = time.monotonic()
     origin = None
     began = None
@@ -84,7 +120,7 @@ async def run_websocket(url, normalizer, duration_s=20, hz=50):
             if origin is None and batch:
                 origin = batch[0].stamp_ns
                 began = time.monotonic()
-                estimator.initialize(InitialState(origin), EstimatorConfig())
+                estimator.initialize(InitialState(origin), estimator_config)
             for event in batch:
                 events.append(event)
                 ingest(estimator, event)
@@ -99,20 +135,32 @@ async def run_websocket(url, normalizer, duration_s=20, hz=50):
         await asyncio.gather(task, return_exceptions=True)
     if not events:
         raise ValueError("Source supplied no usable events")
-    return events, estimates, dict(estimator.counts)
+    counts = (
+        dict(estimator.counts)
+        if hasattr(estimator, "counts")
+        else {"accepted_wheels": estimator.accepted, "rejected_wheels": estimator.rejected}
+    )
+    return events, estimates, counts
 
 
-def run(source, profile, output, run_id, tail_s=0, duration_s=20):
+def run(
+    source, profile, output, run_id, tail_s=0, duration_s=20, estimator_name="wheel-hold", model_config=None
+):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     normalizer = Normalizer(profile)
     if source.startswith(("ws://", "wss://")):
-        events, frames, counts = asyncio.run(run_websocket(source, normalizer, duration_s))
+        events, frames, counts = asyncio.run(
+            run_websocket(
+                source, normalizer, duration_s, estimator_name=estimator_name, model_config=model_config
+            )
+        )
     else:
         events = read_file(source, normalizer)
-        frames, counts = run_events(events, tail_s=tail_s)
+        frames, counts = run_events(events, config=model_config, tail_s=tail_s, estimator_name=estimator_name)
     for frame in frames:
         frame.update(run_id=run_id, schema_version="0.2")
+    timings = [frame["compute_ms"] for frame in frames if frame.get("compute_ms") is not None]
     write_rows(output / "input-events.jsonl", map(event_dict, events))
     write_rows(output / "estimates.jsonl", frames)
     write_json(
@@ -122,11 +170,19 @@ def run(source, profile, output, run_id, tail_s=0, duration_s=20):
             "schema_version": "0.2",
             "status": "completed",
             "source": source,
-            "model_version": "wheel-hold-v1",
+            "model_version": frames[-1]["model_version"],
             "profile": profile,
             "synthetic": (output / "scenario.json").exists(),
-            "config": asdict(EstimatorConfig()),
+            "config": asdict(
+                model_config or (ModelConfig() if estimator_name == "adaptive-ekf" else EstimatorConfig())
+            ),
             "diagnostics": {**dict(normalizer.diagnostics), **counts},
+            "compute_ms": {
+                "p50": _percentile(timings, 0.50),
+                "p95": _percentile(timings, 0.95),
+                "p99": _percentile(timings, 0.99),
+                "max": max(timings, default=None),
+            },
         },
     )
     return frames
