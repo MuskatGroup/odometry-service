@@ -179,3 +179,23 @@ def test_real_bag_case_and_faulted_run_when_dataset_is_available():
     faulted = rd.run_case(case, "lock-1", "B0", fault_start_s=20.0, fault_len_s=10.0)
     assert clean["speed_rmse_mps"] < 0.5 < faulted["speed_rmse_mps"]
     assert clean["recovery_s"] is None and faulted["correction_jump_m"] is None
+
+
+def test_export_run_writes_console_files_with_map_and_null_corrections(tmp_path):
+    from odometry_lab.exportrun import export_run
+
+    bag = ROOT / "dataset/data/30618_2050d396"
+    reference = ROOT / "dataset/derived/reference/30618_2050d396.csv"
+    if not (bag.exists() and reference.exists()):
+        pytest.skip("real bag or derived reference not available")
+    case = rd.build_case(bag, reference, window_s=40.0)
+    report = export_run(case, "lock-1", "B0", tmp_path, "test-run", fault_start_s=10.0, fault_len_s=10.0)
+    assert report["schema_version"] == "0.3"
+    assert report["scenario"]["fault"] == "lock" and report["fault_windows"]
+    assert report["corrections"]["available"] is False
+    track = report["map"]["estimate"]
+    assert track and all(0 < p["x_m"] < 200_000 and 0 < p["y_m"] < 200_000 for p in track)
+    assert {row["route_id"] for row in report["map"]["routes"]} >= {report["map"]["route_id"]}
+    frames = read_rows(tmp_path / "estimates.jsonl")
+    assert frames[0]["run_id"] == "test-run" and frames[0]["schema_version"] == "0.3"
+    assert (tmp_path / "run.json").exists()

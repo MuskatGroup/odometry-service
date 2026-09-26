@@ -13,8 +13,9 @@ from odometry_io import load_profile, write_probe
 from .benchmark import PRESETS, SCENARIOS, benchmark
 from .calibrate import apply_to_profile, calibrate, load_profile_config
 from .evaluate import evaluate
+from .exportrun import export_run
 from .realdata import SCENARIOS as REAL_SCENARIOS
-from .realdata import dedupe, load_split, real_benchmark
+from .realdata import build_case, dedupe, load_split, real_benchmark
 from .runner import run
 from .scenario import generate
 from .storage import read_rows
@@ -146,6 +147,19 @@ def main():
     real.add_argument("--scenario", action="append", choices=tuple(REAL_SCENARIOS))
     real.add_argument("--preset", action="append")
     real.add_argument("--model-profile", help="Model YAML; adds the calibrated preset M1-cal")
+    one = commands.add_parser("real-run", help="One real-bag run for the console (map, reference, estimate)")
+    one.add_argument("--bag", required=True)
+    one.add_argument("--scenario", choices=tuple(REAL_SCENARIOS), default="none")
+    one.add_argument("--preset", default="M1-cal")
+    one.add_argument("--data", default="dataset/data")
+    one.add_argument("--derived", default="dataset/derived")
+    one.add_argument("--window", type=float, default=120.0)
+    one.add_argument("--fault-start", type=float, default=50.0)
+    one.add_argument("--fault-len", type=float, default=20.0)
+    one.add_argument("--model-profile", default="configs/models/default.yaml")
+    one.add_argument("--output", required=True)
+    one.add_argument("--run-id")
+    one.add_argument("--api", help="Console URL to upload the run to, e.g. http://localhost:8080")
     calib = commands.add_parser("calibrate-noise", help="Grid-search EKF noise/gates on identification bags")
     calib.add_argument("--data", default="dataset/data")
     calib.add_argument("--derived", default="dataset/derived")
@@ -216,6 +230,17 @@ def main():
             tuple(args.preset or PRESETS),
             args.window,
         )
+    elif args.command == "real-run":
+        PRESETS["M1-cal"] = ("adaptive-ekf", load_profile_config(args.model_profile))
+        case = build_case(
+            Path(args.data) / args.bag, Path(args.derived) / "reference" / f"{args.bag}.csv", args.window
+        )
+        if case is None:
+            raise SystemExit(f"{args.bag}: no usable GNSS-referenced excerpt")
+        run_id = args.run_id or f"{args.bag}-{args.scenario}-{args.preset}"
+        export_run(case, args.scenario, args.preset, args.output, run_id, args.fault_start, args.fault_len)
+        if args.api:
+            import_report(args.output, args.api)
     elif args.command == "calibrate-noise":
         split = load_split(Path(args.derived) / "split.json")
         bags = dedupe(split["identification"], split["duplicates"])[: args.limit]

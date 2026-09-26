@@ -59,6 +59,8 @@ class RealCase:
     truth: list[dict]  # stamp_ns, v_mps, s_m (s relative to the window start)
     initial: InitialState
     reference_coverage: float
+    route_id: str | None = None
+    s0_m: float = 0.0  # absolute along-track position of the window start on route_id
 
 
 def _tram_bag():
@@ -77,6 +79,7 @@ def load_reference(path: str | Path) -> list[dict]:
                     "stamp_ns": int(row["stamp_ns"]),
                     "v": float(row["v_ref"]) if row["v_ref"] else None,
                     "s": float(row["s_ref"]) if row["s_ref"] else None,
+                    "route": row.get("route_id") or None,
                 }
             )
     return rows
@@ -139,6 +142,8 @@ def build_case(bag_dir: str | Path, reference_csv: str | Path, window_s: float =
         truth=truth,
         initial=InitialState(window.start_ns, 0.0, rows[0]["v"]),
         reference_coverage=len(rows) / max(1, len(in_window)),
+        route_id=with_s[0]["route"],
+        s0_m=s0,
     )
 
 
