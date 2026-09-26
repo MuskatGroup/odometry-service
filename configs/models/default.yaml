@@ -232,3 +232,7 @@ metrics:
     calibration_bags: 8
     objective_rmse_mps: 0.2817
     handpicked_objective_rmse_mps: 0.572
+  test_velocity_rmse_mps: 0.667
+  test_hold_speed_rmse_mps: 2.3167
+  test_bags: 16
+  test_windows_steps: 112400

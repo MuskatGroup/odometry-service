@@ -212,7 +212,10 @@ def horizon_errors(bags: list[dict], theta: np.ndarray, tau: float) -> dict[str,
     Baseline: hold the speed at the window start. Windows must be fully on the graph with reference
     and control available.
     """
-    traction, brake, c1, c2 = unpack(theta)
+    return horizon_errors_tables(bags, *unpack(theta), tau)
+
+
+def horizon_errors_tables(bags, traction, brake, c1, c2, tau) -> dict[str, float]:
     steps = round(HORIZON_S / DT)
     model_sq, hold_sq, count = 0.0, 0.0, 0
     for bag in bags:
@@ -235,6 +238,31 @@ def horizon_errors(bags: list[dict], theta: np.ndarray, tau: float) -> dict[str,
     if not count:
         return {"model_rmse": float("nan"), "hold_rmse": float("nan"), "n": 0}
     return {"model_rmse": (model_sq / count) ** 0.5, "hold_rmse": (hold_sq / count) ** 0.5, "n": count}
+
+
+def evaluate_test(profile_path: Path, split: dict, derived: Path) -> dict:
+    """One-shot evaluation of a saved profile on the untouched test bags (never used for fitting)."""
+    profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
+    vehicle = profile["vehicle_id"]
+    bags = [
+        d
+        for d in (load_bag(derived / "reference" / f"{b}.csv") for b in split["test"])
+        if vehicle == "default" or d["vehicle"] == vehicle
+    ]
+    if not bags:
+        return {}
+    traction = np.array(profile["traction"]["acceleration_mps2"])
+    brake = np.array(profile["braking"]["acceleration_mps2"])
+    longitudinal = profile["longitudinal"]
+    errors = horizon_errors_tables(
+        bags, traction, -np.abs(brake), longitudinal["c1_inv_s"], longitudinal["c2_inv_m"], longitudinal["tau_s"]
+    )
+    return {
+        "test_velocity_rmse_mps": round(float(errors["model_rmse"]), 4),
+        "test_hold_speed_rmse_mps": round(float(errors["hold_rmse"]), 4),
+        "test_bags": len(bags),
+        "test_windows_steps": int(errors["n"]),
+    }
 
 
 # --- artifact ------------------------------------------------------------------------------------
@@ -285,7 +313,20 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--derived", type=Path, default=ROOT / "dataset/derived")
     parser.add_argument("--out", type=Path, default=ROOT / "configs/models")
+    parser.add_argument(
+        "--evaluate-test", action="store_true", help="only score saved profiles on the test bags"
+    )
     args = parser.parse_args()
+    if args.evaluate_test:
+        split = json.loads((args.derived / "split.json").read_text(encoding="utf-8"))
+        for path in sorted(args.out.glob("*.yaml")):
+            result = evaluate_test(path, split, args.derived)
+            if result:
+                profile = yaml.safe_load(path.read_text(encoding="utf-8"))
+                profile["metrics"].update(result)
+                path.write_text(yaml.safe_dump(profile, sort_keys=False, allow_unicode=True), encoding="utf-8")
+            print(path.name, result)
+        return
 
     split = json.loads((args.derived / "split.json").read_text(encoding="utf-8"))
     load = {
