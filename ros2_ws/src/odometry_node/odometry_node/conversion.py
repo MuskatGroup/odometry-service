@@ -47,7 +47,8 @@ def estimate_message(estimate, run_id, compute_ms, map_pose=None, gnss_policy="d
     msg.disturbance_mps2 = float(estimate.disturbance_mps2 or 0)
     msg.wheel_ids = list(estimate.wheel_speeds_mps)
     msg.wheel_speeds_mps = list(estimate.wheel_speeds_mps.values())
-    msg.wheel_health_states = [estimate.wheel_health.get(key, "unknown") for key in msg.wheel_ids]
+    msg.wheel_health_ids = sorted(estimate.wheel_health)
+    msg.wheel_health_states = [estimate.wheel_health[key] for key in msg.wheel_health_ids]
     msg.has_control = estimate.control_u is not None
     msg.control_u = float(estimate.control_u or 0)
     for field in ("control_age", "wheel_age"):
@@ -92,7 +93,7 @@ def frame_dict(msg):
         "sigma_v_mps": msg.sigma_v_mps if msg.uncertainty_available else None,
         "covariance_4x4": list(msg.covariance_4x4) if msg.uncertainty_available else None,
         "wheel_speeds_mps": dict(zip(msg.wheel_ids, msg.wheel_speeds_mps)),
-        "wheel_health": dict(zip(msg.wheel_ids, msg.wheel_health_states)),
+        "wheel_health": dict(zip(msg.wheel_health_ids, msg.wheel_health_states)),
         "control_u": msg.control_u if msg.has_control else None,
         "control_age_s": msg.control_age_s if msg.has_control_age else None,
         "wheel_age_s": msg.wheel_age_s if msg.has_wheel_age else None,

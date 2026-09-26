@@ -17,6 +17,7 @@ bool has_disturbance
 float64 disturbance_mps2
 string[] wheel_ids
 float64[] wheel_speeds_mps
+string[] wheel_health_ids
 string[] wheel_health_states
 bool has_control
 float64 control_u

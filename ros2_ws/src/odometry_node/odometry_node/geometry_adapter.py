@@ -31,13 +31,23 @@ class GeometryAdapter:
         self.tram = geometry.TramGeometry()
 
     def pose_at(self, route_id, s_m):
-        return self.graph.pose_at(route_id, s_m)
+        try:
+            return self.graph.pose_at(route_id, s_m)
+        except Exception as exc:
+            if exc.__class__.__name__ == "OutOfGraphError":
+                raise ValueError("OUT_OF_GRAPH") from exc
+            raise
 
     def body_pose_at(self, route_id, s_m):
-        return self.graph.body_pose_at(route_id, s_m, self.tram.bogie_base_m)
+        try:
+            return self.graph.body_pose_at(route_id, s_m, self.tram.bogie_base_m)
+        except Exception as exc:
+            if exc.__class__.__name__ == "OutOfGraphError":
+                raise ValueError("OUT_OF_GRAPH") from exc
+            raise
 
     def grade_at(self, route_id, s_m):
-        return self.graph.pose_at(route_id, s_m).grade
+        return self.pose_at(route_id, s_m).grade
 
     def observe_dual(self, master_fix, rover_fix, route_id=None):
         first = self.geometry.project_wgs84(*master_fix, self.config)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import resource
 import time
+from collections import deque
 from dataclasses import replace
 
 import rclpy
@@ -30,7 +31,7 @@ from tram_vehicle_msgs.msg import DriverControllerCommand, VelocitySensor
 
 from .conversion import estimate_message, ns, set_stamp
 from .geometry_adapter import GeometryAdapter
-from .organizer import controller_position_to_u, wheel_kmh_to_mps
+from .organizer import controller_position_to_u, percentile, wheel_kmh_to_mps
 
 GNSS_POLICIES = {"disabled", "initialization_only", "intermittent"}
 ANTENNAS = {
@@ -108,6 +109,12 @@ class ReserveOdometryNode(Node):
         self.cpu_cores = 0.0
         self.pending_fixes = {}
         self.gnss_subscriptions = []
+        self.gnss_initialized = False
+        self.prefilter_rejected_position = 0
+        self.prefilter_rejected_velocity = 0
+        self.initial_position_accepts = 0
+        self.gnss_reasons = set()
+        self.latency_ms = deque(maxlen=4096)
 
         self.estimate_publisher = self.create_publisher(LongitudinalEstimate, "/odometry/estimate", 10)
         self.velocity_publisher = self.create_publisher(VelocitySensor, "/result/velocity", 10)
@@ -198,6 +205,8 @@ class ReserveOdometryNode(Node):
     def _fix(self, msg, receiver):
         values = (float(msg.latitude), float(msg.longitude), float(msg.altitude))
         if msg.status.status < 0 or not all(math.isfinite(value) for value in values):
+            self.prefilter_rejected_position += 1
+            self.gnss_reasons.add("GNSS_FIX_INVALID")
             return
         variance = float(msg.position_covariance[0])
         if not math.isfinite(variance) or variance <= 0:
@@ -237,14 +246,20 @@ class ReserveOdometryNode(Node):
 
     def _apply_observation(self, observation, stamp, variance, source):
         if observation is None:
+            self.prefilter_rejected_position += 1
+            self.gnss_reasons.add("GNSS_OUT_OF_GRAPH")
             return
         if abs(observation.cross_track_m) > self.get_parameter("gnss_cross_track_gate_m").value:
+            self.prefilter_rejected_position += 1
+            self.gnss_reasons.add("GNSS_CROSS_TRACK_REJECTED")
             return
         if (
             observation.baseline_error_m is not None
             and abs(observation.baseline_error_m)
             > self.get_parameter("gnss_baseline_error_gate_m").value
         ):
+            self.prefilter_rejected_position += 1
+            self.gnss_reasons.add("GNSS_BASELINE_REJECTED")
             return
         self._ensure_initialized(stamp)
         if self.route_id is None:
@@ -252,7 +267,11 @@ class ReserveOdometryNode(Node):
             self.route_id = observation.route_id
             self.estimator.initialize(InitialState(stamp, observation.s_m, current_v), self.model_config)
             self.estimator.route_id = self.route_id
+            self.gnss_initialized = True
+            self.initial_position_accepts += 1
         elif observation.route_id != self.route_id:
+            self.prefilter_rejected_position += 1
+            self.gnss_reasons.add("GNSS_ROUTE_MISMATCH")
             return
         else:
             self.estimator.ingest_position_correction(
@@ -266,15 +285,17 @@ class ReserveOdometryNode(Node):
                 )
             )
         self.last_gnss_stamp = stamp
-        if self.gnss_policy == "initialization_only":
-            for subscription in self.gnss_subscriptions:
-                self.destroy_subscription(subscription)
-            self.gnss_subscriptions.clear()
-            self.pending_fixes.clear()
+
+    def _disable_gnss(self):
+        for subscription in self.gnss_subscriptions:
+            self.destroy_subscription(subscription)
+        self.gnss_subscriptions.clear()
+        self.pending_fixes.clear()
 
     def _velocity_correction(self, msg, receiver):
         del receiver
         if not self.route_id or self.estimator.t is None:
+            self.prefilter_rejected_velocity += 1
             return
         pose = self.geometry.body_pose_at(self.route_id, self.estimator.x[0])
         linear = msg.twist.linear
@@ -282,6 +303,8 @@ class ReserveOdometryNode(Node):
             pose.yaw_rad
         )
         if not math.isfinite(velocity) or velocity < 0:
+            self.prefilter_rejected_velocity += 1
+            self.gnss_reasons.add("GNSS_VELOCITY_INVALID")
             return
         stamp = ns(msg.header.stamp)
         self.estimator.ingest_velocity_correction(
@@ -311,6 +334,15 @@ class ReserveOdometryNode(Node):
         began = time.perf_counter()
         result = self.estimator.advance_to(stamp)
         compute_ms = (time.perf_counter() - began) * 1000.0
+        result.accepted_gnss_position_count += self.initial_position_accepts
+        result.rejected_gnss_position_count += self.prefilter_rejected_position
+        result.rejected_gnss_velocity_count += self.prefilter_rejected_velocity
+        result.reason_codes.extend(sorted(self.gnss_reasons))
+        self.gnss_reasons.clear()
+        if self.gnss_policy == "initialization_only" and self.gnss_subscriptions and (
+            self.gnss_initialized or result.accepted_gnss_position_count > 0
+        ):
+            self._disable_gnss()
         wall_now, cpu_now = time.perf_counter(), time.process_time()
         wall_delta = wall_now - self.last_perf_wall
         if wall_delta > 0:
@@ -323,6 +355,8 @@ class ReserveOdometryNode(Node):
             except (KeyError, ValueError):
                 result.reason_codes.append("OUT_OF_GRAPH")
                 result.valid = False
+        elif self.route_id is None:
+            result.reason_codes.append("POSITION_INITIALIZING")
         gnss_age = None if self.last_gnss_stamp is None else (stamp - self.last_gnss_stamp) / 1e9
         estimate = estimate_message(
             result,
@@ -362,6 +396,8 @@ class ReserveOdometryNode(Node):
         message.pose.covariance[7] = sine * sine * along + cosine * cosine * cross
         message.pose.covariance[1] = message.pose.covariance[6] = cosine * sine * (along - cross)
         message.pose.covariance[14] = 25.0
+        message.pose.covariance[21] = 1e6
+        message.pose.covariance[28] = 1e6
         message.pose.covariance[35] = float(self.get_parameter("yaw_variance_rad2").value)
         message.twist.covariance[0] = max(result.covariance_4x4[5], 1e-12)
         for index in (7, 14, 21, 28, 35):
@@ -379,7 +415,10 @@ class ReserveOdometryNode(Node):
             status.level = DiagnosticStatus.WARN
         status.message = result.mode
         input_to_publication_ms = max(0.0, (self.get_clock().now().nanoseconds - stamp) / 1e6)
+        self.latency_ms.append(input_to_publication_ms)
         rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+        latency_p95 = percentile(self.latency_ms, 0.95)
+        latency_p99 = percentile(self.latency_ms, 0.99)
         status.values = [
             KeyValue(key="reasons", value=",".join(result.reason_codes)),
             KeyValue(key="compute_ms", value=f"{compute_ms:.6f}"),
@@ -388,6 +427,10 @@ class ReserveOdometryNode(Node):
             KeyValue(key="has_map_pose", value=str(has_map_pose).lower()),
             KeyValue(key="queue_depth", value=str(len(self.estimator.queue))),
             KeyValue(key="input_to_publication_ms", value=f"{input_to_publication_ms:.6f}"),
+            KeyValue(key="latency_samples", value=str(len(self.latency_ms))),
+            KeyValue(key="latency_p95_ms", value=f"{latency_p95:.6f}"),
+            KeyValue(key="latency_p99_ms", value=f"{latency_p99:.6f}"),
+            KeyValue(key="latency_max_ms", value=f"{max(self.latency_ms):.6f}"),
             KeyValue(key="cpu_cores", value=f"{self.cpu_cores:.6f}"),
             KeyValue(key="rss_mb", value=f"{rss_mb:.3f}"),
         ]
