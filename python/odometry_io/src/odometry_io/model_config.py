@@ -131,6 +131,9 @@ def load_model_config(path, vehicle_id="default"):
     braking = _strict_section(document, "braking")
     noise = _strict_section(document, "noise")
     health = _strict_section(document, "wheel_health")
+    recover_updates = health["recover_updates"]
+    if isinstance(recover_updates, bool) or not isinstance(recover_updates, int):
+        raise ModelProfileError("wheel_health.recover_updates must be an integer")
     values = {
         "model_version": document["model_version"],
         "tau_s": _number(longitudinal["tau_s"], "longitudinal.tau_s"),
@@ -154,7 +157,7 @@ def load_model_config(path, vehicle_id="default"):
         ),
         "freeze_s": _number(health["freeze_s"], "wheel_health.freeze_s"),
         "reacquire_s": _number(health["reacquire_s"], "wheel_health.reacquire_s"),
-        "recover_updates": int(health["recover_updates"]),
+        "recover_updates": recover_updates,
         "adapt_disturbance": True,
     }
     try:

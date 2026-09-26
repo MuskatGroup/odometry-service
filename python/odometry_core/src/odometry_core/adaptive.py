@@ -419,8 +419,10 @@ class AdaptiveOdometryEstimator:
         total = (stamp - self.t) / 1e9
         if total > self.config.max_gap_s:
             position = self.x[0]
+            route_id = self.route_id
             initial = InitialState(stamp, position, self.x[1])
             self.initialize(initial, self.config)
+            self.route_id = route_id
             self.last_reset = stamp
             return
         if total:
@@ -655,6 +657,7 @@ class AdaptiveOdometryEstimator:
             for key, sample in self.channels.items()
             if sample.valid
             and key not in self.frozen_ids
+            and self.wheel_health.get(key) == WheelHealthState.NORMAL
             and stamp_ns - sample.stamp_ns <= round(c.wheel_timeout_s * 1e9)
         }
         for key, sample in self.channels.items():

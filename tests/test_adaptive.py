@@ -110,6 +110,27 @@ def test_wrong_route_and_large_gnss_outlier_are_rejected():
     assert result.rejected_gnss_velocity_count == 1
 
 
+def test_rejected_channels_do_not_keep_filter_in_fused_mode():
+    config = ModelConfig(control_timeout_s=None)
+    estimator = AdaptiveOdometryEstimator(config)
+    estimator.initialize(InitialState(0, 0, 5), config)
+    estimator.ingest_control(ControlSample(0, 0, 1.0))
+    estimator.ingest_wheel(WheelSample(100_000_000, 1, "front", 20.0))
+    estimator.ingest_wheel(WheelSample(100_000_000, 1, "rear", 20.0))
+    result = estimator.advance_to(100_000_000)
+    assert result.wheel_speeds_mps == {}
+    assert result.mode == "MODEL_ONLY"
+    assert set(result.wheel_health.values()) == {"positive_slip"}
+
+
+def test_gap_reset_preserves_route_lock():
+    config = ModelConfig(control_timeout_s=None, max_gap_s=1.0)
+    estimator = AdaptiveOdometryEstimator(config)
+    estimator.initialize(InitialState(0, 0, 1), config)
+    estimator.route_id = "route-a"
+    assert estimator.advance_to(2_000_000_000).route_id == "route-a"
+
+
 def test_drive_map_interpolation_and_grade_change_prediction():
     drive = DriveMap(
         (0.5, 1.0),
