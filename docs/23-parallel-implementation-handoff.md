@@ -33,6 +33,27 @@ optional GNSS ─► base_link/map matching ─► correction ──┘   /resul
 - выдавать метрики относительно GNSS-derived reference;
 - иметь документацию сборки, запуска, модели и ограничений.
 
+### 1.1. Фактическое состояние на момент старта
+
+| Компонент | Состояние сейчас | Что ещё требуется |
+|---|---|---|
+| `wheel-hold` baseline | Реализован и протестирован | Оставить для сравнения |
+| Robust EKF `[s,v,a,d]` | Есть рабочий прототип с covariance | Обобщить correction API и откалибровать |
+| Модель тягового привода | Есть только формула `kt/kb/dead-zone/v_sat` с начальными коэффициентами | Идентифицировать `tau` и traction/brake tables по данным |
+| Продольная динамика | Есть лаг привода и сопротивление `c1/c2` | Добавить `grade(s)`, vehicle profiles и калибровку noise |
+| Проскальзывание/отказы | Есть innovation gate, median, freeze, jump и reacquisition | Разделить состояния slip/slide/fault и откалибровать пороги |
+| Универсальный IO | CSV/JSON/JSONL/WebSocket и profile normalization реализованы | Подключить реальные organizer topics и `/3.6` |
+| Dataset reader | Читает wheel/control и четыре GNSS-топика | Построить синхронизированный reference builder |
+| Pathgraph | Есть pandas-инструменты анализа и viewer | Нет production-библиотеки `pose_at/project` |
+| ROS | Есть replay, adapter, estimator и telemetry bridge на внутренних `/tram/*` | Нет прямых `/vehicle/*`, `/result/*` и GNSS policies |
+| Failure Lab | Есть синтетика, evaluator и benchmark пяти вариантов | Нет split реальных bag, GNSS masking и map metrics |
+| API/web | Базовый стенд реализован | Добавить карту, health, corrections и новые метрики |
+| Идентификация/калибровка | Не реализована | Нужны identification/validation/test и versioned model YAML |
+
+Иными словами, текущий код — хороший алгоритмический каркас, но не готовая модель
+конкретного трамвая. Числа `kt`, `kb`, `tau`, `c1`, `c2`, noise и gates пока являются
+стартовыми предположениями, а не результатом идентификации по датасету организаторов.
+
 ## 2. Правила параллельной работы
 
 Создать две ветки от одного commit:
@@ -120,6 +141,29 @@ tests/integration/test_ros.py
 
 ### 3.3. Задачи A2 — модель и robust EKF
 
+Этот блок обязан дать все три модели, требуемые заданием. Это не три независимые
+нейросети, а единая gray-box модель: физическая структура известна, её параметры и
+таблицы идентифицируются по identification-bag, а EKF оценивает состояние во время движения.
+
+#### A2.1. Модель тягового привода
+
+Входы: нормализованная позиция контроллера `u`, скорость `v`, `vehicle_id`. Выход:
+запрошенное продольное ускорение `a_cmd` до динамического лага.
+
+```text
+a_cmd = traction_table(u, v, vehicle_id),  u > dead_zone
+a_cmd = 0,                                 |u| <= dead_zone
+a_cmd = brake_table(u, v, vehicle_id),     u < -dead_zone
+tau·da_act/dt = a_cmd - a_act
+```
+
+Первая обязательная версия — монотонные lookup-таблицы с интерполяцией. Параметрическая
+формула `kt/kb/v_sat` остаётся baseline. Таблицы и `tau` идентифицируются офлайн
+разработчиком 2 по GNSS-derived `a_ref`, затем сохраняются в versioned YAML. Во время
+закрытого теста повторной идентификации нет: runtime только читает готовый профиль.
+
+#### A2.2. Модель продольной динамики
+
 Состояние:
 
 ```text
@@ -134,6 +178,26 @@ tau·da/dt = a_cmd(u, v, vehicle_id) - a_act
 dv/dt     = a_act - c1·v - c2·v·|v| - g·grade(s) + d
 dd/dt     = process_noise
 ```
+
+Идентифицируемые по identification-bag параметры: `tau`, `c1`, `c2`, значения traction/brake tables,
+process noise и measurement noise. `grade(s)` поступает из Pathgraph. Масса не должна
+оцениваться как надёжно наблюдаемая величина по имеющимся сигналам; её влияние входит в
+профиль тяги и медленное возмущение `d`.
+
+Структура уравнений задаётся инженером и не «обучается» как black-box ML. По данным
+решается задача идентификации параметров с ограничениями, затем параметры проверяются на
+validation-bag и только один раз оцениваются на test-bag.
+
+#### A2.3. Модель/эвристика проскальзывания
+
+Обязательная версия — интерпретируемый state machine по каждому колёсному каналу. Его
+признаки: wheel-model innovation, расхождение тележек, производная колёсной скорости,
+`u`, знак модельного ускорения, freshness и длительность постоянного значения.
+
+Пороги gate, hysteresis и reacquisition калибруются на identification-bag и синтетических отказах.
+GNSS разрешён при подготовке меток и проверке, но не является runtime-признаком. Если
+позже появится достаточно надёжных меток, классификатор может заменить только вычисление
+health/slip probability; safety gates и fallback `MODEL_ONLY` сохраняются.
 
 Реализовать:
 
@@ -311,7 +375,8 @@ controller, front_wheel_mps, rear_wheel_mps, grade, curvature,
 reference_available, reference_uncertainty
 ```
 
-Разделить train/validation/test целыми bag, не временными строками. На train определить
+Разделить identification/validation/test целыми bag, не временными строками. На
+identification subset определить
 `tau`, таблицы тяги/торможения, сопротивление и process-noise. Сохранить:
 
 ```text
@@ -320,7 +385,7 @@ configs/models/30618.yaml
 configs/models/30639.yaml
 ```
 
-Каждый файл содержит версию, дату, train bags и метрики validation. Test bags не
+Каждый файл содержит версию, метод, identification bags и метрики validation. Test bags не
 используются для подбора параметров.
 
 ### 4.5. Задачи B4 — Failure Lab и метрики
@@ -457,6 +522,60 @@ estimator.ingest_velocity_correction(sample)
 
 Geometry не импортирует core. Core не импортирует geometry. Их связывает только ROS-нода
 разработчика 1.
+
+### 5.1. Контракт артефакта параметров модели
+
+Разработчик 2 создаёт YAML, разработчик 1 реализует его строгую загрузку. Неизвестные
+поля, несовпадающие размеры таблиц и нечисловые значения являются ошибкой запуска.
+
+```yaml
+schema_version: 1
+model_version: tram-graybox-v1
+vehicle_id: default
+identified_at_utc: null  # заполняется фактическим временем идентификации
+identification_method: constrained_least_squares
+identification_bags: []
+validation_bags: []
+
+longitudinal:
+  tau_s: 0.3
+  c1_inv_s: 0.01
+  c2_inv_m: 0.0
+  disturbance_limit_mps2: 1.5
+
+traction:
+  controller_u: [0.1, 0.5, 1.0]
+  speed_mps: [0.0, 5.0, 10.0, 20.0]
+  acceleration_mps2: []  # matrix len(controller_u) x len(speed_mps)
+
+braking:
+  controller_u: [-0.1, -0.5, -1.0]
+  speed_mps: [0.0, 5.0, 10.0, 20.0]
+  acceleration_mps2: []  # отрицательные значения, та же размерность
+
+noise:
+  q_v: 0.01
+  q_a: 0.05
+  q_d: 0.001
+  wheel_variance_floor: 0.04
+
+wheel_health:
+  gate_normal: 9.0
+  gate_reject: 36.0
+  max_wheel_accel_mps2: 6.0
+  freeze_s: 1.0
+  reacquire_s: 10.0
+  recover_updates: 5
+
+metrics:
+  reference_coverage: null
+  validation_velocity_rmse_mps: null
+```
+
+Интерполяция таблиц билинейная. За границами скорости используется ближайшая граничная
+ячейка, а позиция контроллера предварительно ограничивается допустимым диапазоном. Знак
+ускорения в braking table отрицательный. Если профиль конкретного `vehicle_id` отсутствует,
+загружается `default`; молчаливый переход на hardcoded коэффициенты запрещён.
 
 ## 6. Что оба начинают делать сейчас
 
