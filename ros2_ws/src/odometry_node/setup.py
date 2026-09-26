@@ -18,6 +18,7 @@ setup(
             "replay = odometry_node.source:main",
             "source_adapter = odometry_node.adapter:main",
             "telemetry_bridge = odometry_node.bridge:main",
+            "reserve_odometry_node = odometry_node.runtime:main",
         ]
     },
 )
