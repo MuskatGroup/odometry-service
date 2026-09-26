@@ -155,8 +155,8 @@ braking:
     - -4.2368
     - -4.9839
 noise:
-  q_v: 0.01
-  q_a: 0.05
+  q_v: 0.05
+  q_a: 3.0
   q_d: 0.001
   wheel_variance_floor: 0.04
 wheel_health:
@@ -172,3 +172,14 @@ metrics:
   validation_hold_speed_rmse_mps: 2.094
   validation_horizon_s: 10.0
   validation_windows_steps: 9600
+  noise_calibration:
+    method: grid_search_speed_rmse_with_injected_faults
+    scenarios:
+    - none
+    - freeze-1
+    - slip-1
+    - dropout-1
+    - spike-1
+    calibration_bags: 8
+    objective_rmse_mps: 0.2817
+    handpicked_objective_rmse_mps: 0.572
