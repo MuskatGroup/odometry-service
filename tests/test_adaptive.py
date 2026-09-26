@@ -1,5 +1,14 @@
 import pytest
-from odometry_core import AdaptiveOdometryEstimator, ControlSample, InitialState, ModelConfig, WheelSample
+from odometry_core import (
+    AdaptiveOdometryEstimator,
+    AlongTrackPositionCorrection,
+    ControlSample,
+    DriveMap,
+    InitialState,
+    LongitudinalVelocityCorrection,
+    ModelConfig,
+    WheelSample,
+)
 from odometry_io import probe
 from odometry_lab.evaluate import evaluate
 from odometry_lab.storage import write_rows
@@ -59,6 +68,62 @@ def test_frozen_channel_is_removed_while_acceleration_is_expected():
         result = estimator.advance_to(stamp)
     assert "WHEEL_FROZEN" in result.reason_codes
     assert "frozen" not in result.wheel_speeds_mps
+    assert result.wheel_health["frozen"] == "frozen"
+
+
+def test_scalar_velocity_and_position_corrections_are_ordered_and_counted():
+    config = ModelConfig(control_timeout_s=None, position_correction_gate=1_000)
+    estimator = AdaptiveOdometryEstimator(config)
+    estimator.initialize(InitialState(0, 0, 1), config)
+    stamp = 1_000_000_000
+    estimator.ingest_position_correction(
+        AlongTrackPositionCorrection(stamp, 4, "route-a", 4.0, 0.1, "gnss")
+    )
+    estimator.ingest_velocity_correction(
+        LongitudinalVelocityCorrection(stamp, 3, 2.0, 0.1, "gnss")
+    )
+    estimator.ingest_control(ControlSample(stamp, 1, 0.0))
+    estimator.ingest_wheel(WheelSample(stamp, 2, "front", 2.0))
+    result = estimator.advance_to(stamp)
+    assert result.route_id == "route-a"
+    assert result.accepted_gnss_velocity_count == 1
+    assert result.accepted_gnss_position_count == 1
+    assert result.s_m > 1.0
+
+
+def test_wrong_route_and_large_gnss_outlier_are_rejected():
+    config = ModelConfig(control_timeout_s=None)
+    estimator = AdaptiveOdometryEstimator(config)
+    estimator.initialize(InitialState(0, 0, 1), config)
+    estimator.ingest_position_correction(
+        AlongTrackPositionCorrection(0, 1, "route-a", 0.1, 1.0, "gnss")
+    )
+    estimator.advance_to(0)
+    estimator.ingest_position_correction(
+        AlongTrackPositionCorrection(1, 2, "route-b", 0.2, 1.0, "gnss")
+    )
+    estimator.ingest_velocity_correction(
+        LongitudinalVelocityCorrection(1, 3, 100.0, 0.01, "gnss")
+    )
+    result = estimator.advance_to(1)
+    assert result.rejected_gnss_position_count == 1
+    assert result.rejected_gnss_velocity_count == 1
+
+
+def test_drive_map_interpolation_and_grade_change_prediction():
+    drive = DriveMap(
+        (0.5, 1.0),
+        (0.0, 10.0),
+        ((0.5, 0.25), (1.0, 0.5)),
+    )
+    assert drive.evaluate(0.75, 5.0)[0] == pytest.approx(0.5625)
+    config = ModelConfig(control_timeout_s=None, traction_map=drive, c1=0.0)
+    flat = AdaptiveOdometryEstimator(config, grade_provider=lambda _s: 0.0)
+    uphill = AdaptiveOdometryEstimator(config, grade_provider=lambda _s: 0.02)
+    for estimator in (flat, uphill):
+        estimator.initialize(InitialState(0, 0, 5), config)
+        estimator.ingest_control(ControlSample(0, 0, 0.75))
+    assert uphill.advance_to(1_000_000_000).v_mps < flat.advance_to(1_000_000_000).v_mps
 
 
 def test_probe_writes_review_required_draft(tmp_path):

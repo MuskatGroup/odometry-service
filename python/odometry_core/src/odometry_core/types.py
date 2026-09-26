@@ -1,6 +1,7 @@
 """Transport-independent domain types. SI units, integer event time."""
 
 from dataclasses import asdict, dataclass, field
+from enum import Enum
 from typing import Protocol
 
 
@@ -21,7 +22,41 @@ class WheelSample:
     valid: bool = True
 
 
-Event = ControlSample | WheelSample
+@dataclass(frozen=True)
+class LongitudinalVelocityCorrection:
+    stamp_ns: int
+    seq: int
+    v_mps: float
+    variance_m2ps2: float
+    source: str
+
+
+@dataclass(frozen=True)
+class AlongTrackPositionCorrection:
+    stamp_ns: int
+    seq: int
+    route_id: str
+    s_m: float
+    variance_m2: float
+    source: str
+
+
+class WheelHealthState(str, Enum):
+    NORMAL = "normal"
+    POSITIVE_SLIP = "positive_slip"
+    BRAKING_SLIDE = "braking_slide"
+    FROZEN = "frozen"
+    DROPOUT = "dropout"
+    INCONSISTENT = "inconsistent"
+    UNKNOWN = "unknown"
+
+
+Event = (
+    ControlSample
+    | WheelSample
+    | LongitudinalVelocityCorrection
+    | AlongTrackPositionCorrection
+)
 
 
 @dataclass(frozen=True)
@@ -64,6 +99,12 @@ class Estimate:
     sigma_v_mps: float | None = None
     a_mps2: float | None = None
     disturbance_mps2: float | None = None
+    wheel_health: dict[str, str] = field(default_factory=dict)
+    route_id: str | None = None
+    accepted_gnss_velocity_count: int = 0
+    rejected_gnss_velocity_count: int = 0
+    accepted_gnss_position_count: int = 0
+    rejected_gnss_position_count: int = 0
     model_version: str = "wheel-hold-v1"
 
     def to_dict(self) -> dict:
@@ -76,15 +117,30 @@ class Estimate:
 def event_dict(event: Event) -> dict:
     result = asdict(event)
     result["stamp_ns"] = str(event.stamp_ns)
-    result["kind"] = "control" if isinstance(event, ControlSample) else "wheel"
+    if isinstance(event, ControlSample):
+        result["kind"] = "control"
+    elif isinstance(event, WheelSample):
+        result["kind"] = "wheel"
+    elif isinstance(event, LongitudinalVelocityCorrection):
+        result["kind"] = "velocity_correction"
+    else:
+        result["kind"] = "position_correction"
     return result
 
 
 def event_key(event: Event) -> tuple:
+    if isinstance(event, ControlSample):
+        order, identifier = 0, ""
+    elif isinstance(event, WheelSample):
+        order, identifier = 1, event.wheel_id
+    elif isinstance(event, LongitudinalVelocityCorrection):
+        order, identifier = 2, event.source
+    else:
+        order, identifier = 3, event.source
     return (
         event.stamp_ns,
-        0 if isinstance(event, ControlSample) else 1,
-        "" if isinstance(event, ControlSample) else event.wheel_id,
+        order,
+        identifier,
         event.seq,
     )
 
@@ -93,5 +149,7 @@ class Estimator(Protocol):
     def initialize(self, initial: InitialState, config: EstimatorConfig) -> None: ...
     def ingest_control(self, sample: ControlSample) -> None: ...
     def ingest_wheel(self, sample: WheelSample) -> None: ...
+    def ingest_velocity_correction(self, sample: LongitudinalVelocityCorrection) -> None: ...
+    def ingest_position_correction(self, sample: AlongTrackPositionCorrection) -> None: ...
     def advance_to(self, stamp_ns: int) -> Estimate: ...
     def reset(self) -> None: ...

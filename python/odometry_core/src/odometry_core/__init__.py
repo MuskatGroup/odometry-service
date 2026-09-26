@@ -1,14 +1,27 @@
-from .adaptive import AdaptiveOdometryEstimator, ModelConfig
+from .adaptive import AdaptiveOdometryEstimator, DriveMap, ModelConfig
 from .estimator import OdometryEstimator
-from .types import ControlSample, Estimate, EstimatorConfig, InitialState, WheelSample
+from .types import (
+    AlongTrackPositionCorrection,
+    ControlSample,
+    Estimate,
+    EstimatorConfig,
+    InitialState,
+    LongitudinalVelocityCorrection,
+    WheelHealthState,
+    WheelSample,
+)
 
 __all__ = [
     "AdaptiveOdometryEstimator",
     "ModelConfig",
+    "DriveMap",
     "OdometryEstimator",
     "ControlSample",
     "WheelSample",
     "InitialState",
     "EstimatorConfig",
     "Estimate",
+    "AlongTrackPositionCorrection",
+    "LongitudinalVelocityCorrection",
+    "WheelHealthState",
 ]
