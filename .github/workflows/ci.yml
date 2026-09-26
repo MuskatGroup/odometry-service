@@ -1,0 +1,33 @@
+name: checks
+on: [push, pull_request]
+jobs:
+  python:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked --python 3.10
+      - run: uv run pytest -q
+      - run: uv run ruff check python tests ros2_ws/src/odometry_node
+  console:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with: {dotnet-version: "10.0.x"}
+      - uses: actions/setup-node@v4
+        with: {node-version: "22"}
+      - uses: astral-sh/setup-uv@v6
+      - run: dotnet restore apps/api/Odometry.Api.csproj --locked-mode
+      - run: dotnet build apps/api/Odometry.Api.csproj --no-restore
+      - run: uv sync --locked --python 3.10
+      - run: uv run pytest -q tests/test_api.py
+        env: {RUN_API_TESTS: "1"}
+      - run: npm ci && npm run build
+        working-directory: apps/web
+  ros:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose --profile test build ros-tests
+      - run: docker compose --profile test run --rm --no-deps ros-tests

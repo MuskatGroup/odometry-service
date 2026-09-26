@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Canonical input event v0.2",
+  "type": "object",
+  "required": [
+    "kind",
+    "stamp_ns",
+    "seq",
+    "valid"
+  ],
+  "properties": {
+    "kind": {
+      "enum": [
+        "control",
+        "wheel"
+      ]
+    },
+    "stamp_ns": {
+      "type": "string",
+      "pattern": "^[0-9]+$"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "valid": {
+      "type": "boolean"
+    },
+    "u": {
+      "type": "number",
+      "minimum": -1,
+      "maximum": 1
+    },
+    "wheel_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "speed_mps": {
+      "type": "number",
+      "minimum": 0
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "kind": {
+          "const": "control"
+        }
+      },
+      "required": [
+        "u"
+      ]
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "wheel"
+        }
+      },
+      "required": [
+        "wheel_id",
+        "speed_mps"
+      ]
+    }
+  ],
+  "additionalProperties": false
+}

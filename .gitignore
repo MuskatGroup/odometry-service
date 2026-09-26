@@ -151,6 +151,8 @@ activemq-data/
 .env
 .envrc
 .venv
+.venv-analysis/
+dataset/analysis/requirements.txt
 env/
 venv/
 ENV/
@@ -216,3 +218,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Odometry workspace
+.uv-cache/
+node_modules/
+bin/
+obj/
+artifacts/
+ros2_ws/install/
+ros2_ws/log/

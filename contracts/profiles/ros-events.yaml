@@ -1,0 +1,11 @@
+version: "0.1"
+layout: events
+time: {field: message.header.stamp, unit: ros, clock: ros}
+seq_field: message.seq
+valid_field: message.valid
+kind_field: kind
+wheel_id_field: message.wheel_id
+control: {field: message.u, mapping: linear}
+wheels:
+  - {id: left, field: message.speed_mps, unit: m/s}
+  - {id: right, field: message.speed_mps, unit: m/s}
