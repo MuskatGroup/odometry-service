@@ -42,6 +42,49 @@ uv run --group analysis jupyter lab dataset/analysis
 Общие преобразования находятся в `bag_analysis.py`, а низкоуровневое чтение
 ROS 2 bag — в `read_bag.py`. Не копируйте десериализацию заново в notebook.
 
+## Просмотр Pathgraph
+
+Простой интерактивный просмотрщик показывает оба направленных пути, начало и конец,
+стрелки направления, профиль высоты и кривизну:
+
+```powershell
+uv run --group analysis python dataset/analysis/pathgraph_viewer.py
+```
+
+По умолчанию Matplotlib использует `WebAgg` и открывает просмотрщик в браузере; процесс
+работает до `Ctrl+C`. Доступны масштабирование и перемещение. Щелчок рядом с линией
+показывает ближайшую точку, её `route_id`, `s`, `x/y/z`, `yaw` и кривизну. В notebook
+используется выбранный Jupyter backend, поэтому отдельный сервер не запускается.
+
+Показать только одно направление:
+
+```powershell
+uv run --group analysis python dataset/analysis/pathgraph_viewer.py `
+  --route tallinskaya_to_shchukinskaya
+```
+
+Сохранить изображение без открытия окна:
+
+```powershell
+uv run --group analysis python dataset/analysis/pathgraph_viewer.py `
+  --save dataset/analysis/pathgraph.png `
+  --no-show
+```
+
+Те же данные можно использовать в notebook:
+
+```python
+from pathgraph_analysis import load_all_pathgraphs, pathgraph_summary
+from pathgraph_viewer import create_pathgraph_figure
+
+routes = load_all_pathgraphs()
+display(pathgraph_summary(routes))
+create_pathgraph_figure(list(routes.values()))
+```
+
+`pathgraph_analysis.py` валидирует JSON, упорядочивает точки по `point_indices`,
+нормализует `tang`, вычисляет накопленную координату `s` и сглаженный уклон.
+
 ## Проверка окружения в notebook
 
 ```python
