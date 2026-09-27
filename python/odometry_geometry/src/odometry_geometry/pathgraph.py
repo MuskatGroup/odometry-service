@@ -27,6 +27,22 @@ _CYRILLIC = dict(
     )
 )
 
+# Stable ASCII route ids, curated per the organizers' two known filenames (see docs
+# `19-pathgraph-audit-and-integration.md`, section 5, requirement 9). Deliberately NOT derived
+# from the filename text at load time: requirement 9 demands ids that do not depend on the
+# filename, so a rename, re-casing, or whitespace change in the organizers' files must never
+# change the route id. Keyed by a normalized (casefolded, whitespace-collapsed) file stem so
+# trivial spelling variants of the same two files still resolve, while anything genuinely new
+# is refused rather than silently given an invented id (see `route_id_for_file`).
+_ROUTE_ID_BY_STEM = {
+    "таллинская - щукинская": "tallinskaya_to_shchukinskaya",
+    "щукинская - таллинская": "shchukinskaya_to_tallinskaya",
+}
+
+
+def _normalize_stem(stem: str) -> str:
+    return " ".join(stem.casefold().split())
+
 
 class OutOfGraphError(ValueError):
     """``s`` outside the route."""
@@ -58,8 +74,14 @@ def _wrap(angle: float) -> float:
 
 
 def route_id_from_name(name: str) -> str:
-    """Stable ASCII id from a file stem, e.g. the Russian 'таллинская - щукинская' becomes
-    'tallinskaya-shchukinskaya'."""
+    """Mechanical, filename-derived transliteration, e.g. 'таллинская - щукинская' becomes
+    'tallinskaya-shchukinskaya'.
+
+    This is NOT a stable route id (requirement 9 explicitly forbids one that depends on the
+    filename) and ``PathGraph.from_directory`` never uses it to name a route on its own. It
+    exists only so an error about an unmapped file can suggest a candidate id to add to
+    ``_ROUTE_ID_BY_STEM``.
+    """
     out = []
     for ch in name.lower():
         if ch in _CYRILLIC:
@@ -72,6 +94,69 @@ def route_id_from_name(name: str) -> str:
     if not text:
         raise ValueError(f"cannot build route id from {name!r}")
     return text
+
+
+def route_id_for_file(file: Path) -> str:
+    """Stable ASCII route id for a Pathgraph file, independent of the exact filename text.
+
+    Looks the file's (normalized) stem up in the curated ``_ROUTE_ID_BY_STEM`` table so the id
+    never silently changes if the organizers rename, re-case, or re-space a file. A stem that
+    is not in the table is refused rather than given an invented, filename-derived id, since
+    that would just recreate the instability requirement 9 forbids one level up: extend the
+    table instead.
+    """
+    stem = _normalize_stem(file.stem)
+    try:
+        return _ROUTE_ID_BY_STEM[stem]
+    except KeyError:
+        suggestion = route_id_from_name(file.stem)
+        raise ValueError(
+            f"{file.name}: file stem {stem!r} is not in the curated route id table "
+            f"(_ROUTE_ID_BY_STEM); add it there with a stable id (e.g. {suggestion!r} is the "
+            "mechanical transliteration, but pick the organizers' proposed id if this is one of "
+            "the two known routes) rather than deriving one from the filename"
+        ) from None
+
+
+def _ordered_points_from_document(document: object, file_name: str) -> list[dict]:
+    """Validate top-level ``points``/``paths`` and return points in ``point_indices`` order.
+
+    Per the spec (section 5, requirements 1-3) the route's point order is defined by
+    concatenating ``point_indices`` across every entry of ``paths``, not by assuming
+    ``points`` is already in route order.
+    """
+    if not isinstance(document, dict):
+        raise ValueError(f"{file_name}: top-level document must be an object")
+    points = document.get("points")
+    paths = document.get("paths")
+    if not isinstance(points, list):
+        raise ValueError(f"{file_name}: 'points' must be a list")
+    if not isinstance(paths, list):
+        raise ValueError(f"{file_name}: 'paths' must be a list")
+    if not paths:
+        raise ValueError(f"{file_name}: 'paths' must contain at least one entry")
+    ordered_indices: list[int] = []
+    for path_i, entry in enumerate(paths):
+        if not isinstance(entry, dict):
+            raise ValueError(f"{file_name}: paths[{path_i}] must be an object")
+        point_indices = entry.get("point_indices")
+        if not isinstance(point_indices, list):
+            raise ValueError(f"{file_name}: paths[{path_i}].point_indices must be a list")
+        for index in point_indices:
+            if isinstance(index, bool) or not isinstance(index, int):
+                raise ValueError(
+                    f"{file_name}: paths[{path_i}].point_indices contains a non-integer index "
+                    f"({index!r})"
+                )
+            if index < 0 or index >= len(points):
+                raise ValueError(
+                    f"{file_name}: paths[{path_i}].point_indices index {index} out of bounds "
+                    f"for {len(points)} points"
+                )
+        ordered_indices.extend(point_indices)
+    if not ordered_indices:
+        raise ValueError(f"{file_name}: 'paths' produced an empty point sequence")
+    return [points[i] for i in ordered_indices]
 
 
 class _Route:
@@ -179,13 +264,13 @@ class PathGraph:
         for file in files:
             try:
                 document = json.loads(file.read_text(encoding="utf-8"))
-                points = document["points"]
-            except (OSError, ValueError, KeyError, TypeError) as exc:
+            except (OSError, ValueError) as exc:
                 raise ValueError(f"{file.name}: invalid Pathgraph file ({exc})") from exc
-            rid = route_id_from_name(file.stem)
+            ordered_points = _ordered_points_from_document(document, file.name)
+            rid = route_id_for_file(file)
             if rid in routes:
                 raise ValueError(f"duplicate route id {rid!r}")
-            routes[rid] = points
+            routes[rid] = ordered_points
         return cls(routes, **kwargs)
 
     def _insert(self, rid: str, i: int, route: _Route) -> None:

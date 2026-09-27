@@ -53,7 +53,7 @@ production-запуск завершается ошибкой.
 ros2 run odometry_node reserve_odometry_node --ros-args \
   --params-file configs/ros/disabled.yaml \
   -p vehicle_id:=30618 \
-  -p route_id:=tallinskaya-shchukinskaya \
+  -p route_id:=tallinskaya_to_shchukinskaya \
   -p s0:=0.0 \
   -p pathgraph_directory:=dataset/Pathgraph \
   -p model_config:=configs/models
