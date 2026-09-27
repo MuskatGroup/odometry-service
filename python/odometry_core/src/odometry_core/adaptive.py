@@ -10,16 +10,93 @@ from __future__ import annotations
 import heapq
 import math
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass, fields
 from statistics import median
 
-from .types import ControlSample, Estimate, InitialState, WheelSample, event_key
+from .types import (
+    AlongTrackPositionCorrection,
+    ControlSample,
+    Estimate,
+    InitialState,
+    LongitudinalVelocityCorrection,
+    WheelHealthState,
+    WheelSample,
+    event_key,
+)
 
 N = 4
+GRAVITY_MPS2 = 9.80665
+
+
+@dataclass(frozen=True)
+class DriveMap:
+    """Rectangular controller/speed acceleration map with bounded interpolation."""
+
+    controller_u: tuple[float, ...]
+    speed_mps: tuple[float, ...]
+    acceleration_mps2: tuple[tuple[float, ...], ...]
+
+    def __post_init__(self):
+        if len(self.controller_u) < 1 or len(self.speed_mps) < 1:
+            raise ValueError("Drive map axes cannot be empty")
+        if len(self.acceleration_mps2) != len(self.controller_u) or any(
+            len(row) != len(self.speed_mps) for row in self.acceleration_mps2
+        ):
+            raise ValueError("Drive map dimensions do not match its axes")
+        values = (*self.controller_u, *self.speed_mps, *(v for row in self.acceleration_mps2 for v in row))
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError("Drive map values must be finite")
+        for axis in (self.controller_u, self.speed_mps):
+            differences = [b - a for a, b in zip(axis, axis[1:])]
+            if differences and not (all(d > 0 for d in differences) or all(d < 0 for d in differences)):
+                raise ValueError("Drive map axes must be strictly monotonic")
+
+    @staticmethod
+    def _interval(axis, value):
+        ascending = axis[0] <= axis[-1]
+        ordered = axis if ascending else tuple(reversed(axis))
+        bounded = min(max(value, ordered[0]), ordered[-1])
+        if len(ordered) == 1:
+            low = high = 0
+            fraction = 0.0
+        else:
+            low = next((i for i in range(len(ordered) - 1) if ordered[i] <= bounded <= ordered[i + 1]), len(ordered) - 2)
+            high = low + 1
+            fraction = (bounded - ordered[low]) / (ordered[high] - ordered[low])
+        if not ascending:
+            low, high = len(axis) - 1 - low, len(axis) - 1 - high
+        return low, high, fraction
+
+    def evaluate(self, controller_u, speed_mps):
+        ui0, ui1, uf = self._interval(self.controller_u, controller_u)
+        vi0, vi1, vf = self._interval(self.speed_mps, speed_mps)
+        row0 = self.acceleration_mps2[ui0]
+        row1 = self.acceleration_mps2[ui1]
+        at_u0 = row0[vi0] + vf * (row0[vi1] - row0[vi0])
+        at_u1 = row1[vi0] + vf * (row1[vi1] - row1[vi0])
+        value = at_u0 + uf * (at_u1 - at_u0)
+        delta = max(1e-3, abs(speed_mps) * 1e-4)
+        if len(self.speed_mps) == 1:
+            derivative = 0.0
+        else:
+            left = self._evaluate_value(controller_u, speed_mps - delta)
+            right = self._evaluate_value(controller_u, speed_mps + delta)
+            derivative = (right - left) / (2 * delta)
+        return value, derivative
+
+    def _evaluate_value(self, controller_u, speed_mps):
+        ui0, ui1, uf = self._interval(self.controller_u, controller_u)
+        vi0, vi1, vf = self._interval(self.speed_mps, speed_mps)
+        row0, row1 = self.acceleration_mps2[ui0], self.acceleration_mps2[ui1]
+        first = row0[vi0] + vf * (row0[vi1] - row0[vi0])
+        second = row1[vi0] + vf * (row1[vi1] - row1[vi0])
+        return first + uf * (second - first)
 
 
 @dataclass(frozen=True)
 class ModelConfig:
+    model_version: str = "ekf-robust-v1"
     kt: float = 1.2
     kb: float = 1.5
     u_dead: float = 0.05
@@ -58,8 +135,15 @@ class ModelConfig:
     use_wheels: bool = True
     robust: bool = True
     adapt_disturbance: bool = False
+    disturbance_limit_mps2: float = 1.5
+    velocity_correction_gate: float = 36.0
+    position_correction_gate: float = 36.0
+    traction_map: DriveMap | None = None
+    braking_map: DriveMap | None = None
 
     def __post_init__(self):
+        if not self.model_version:
+            raise ValueError("model_version is required")
         positive = (
             "kt",
             "kb",
@@ -78,6 +162,9 @@ class ModelConfig:
             "max_model_only_s",
             "max_step_s",
             "max_gap_s",
+            "disturbance_limit_mps2",
+            "velocity_correction_gate",
+            "position_correction_gate",
             "p0_s",
             "p0_v",
             "p0_a",
@@ -101,7 +188,16 @@ class ModelConfig:
         unknown = set(values) - known
         if unknown:
             raise ValueError(f"Unknown model parameters: {sorted(unknown)}")
-        return cls(**values)
+        converted = dict(values)
+        for name in ("traction_map", "braking_map"):
+            value = converted.get(name)
+            if isinstance(value, dict):
+                converted[name] = DriveMap(
+                    tuple(value["controller_u"]),
+                    tuple(value["speed_mps"]),
+                    tuple(tuple(row) for row in value["acceleration_mps2"]),
+                )
+        return cls(**converted)
 
 
 def _mm(a, b):
@@ -117,8 +213,13 @@ class AdaptiveOdometryEstimator:
 
     MODEL_VERSION = "ekf-robust-v1"
 
-    def __init__(self, model_config: ModelConfig | None = None):
+    def __init__(
+        self,
+        model_config: ModelConfig | None = None,
+        grade_provider: Callable[[float], float] | None = None,
+    ):
         self.default_config = model_config or ModelConfig()
+        self.grade_provider = grade_provider or (lambda _s: 0.0)
         self.reset()
 
     def reset(self):
@@ -137,12 +238,19 @@ class AdaptiveOdometryEstimator:
         self.serial = 0
         self.output_seq = 0
         self.accepted = self.rejected = 0
+        self.accepted_gnss_velocity = self.rejected_gnss_velocity = 0
+        self.accepted_gnss_position = self.rejected_gnss_position = 0
+        self.last_gnss = None
+        self.route_id = None
         self.quality = "FUSED"
         self.streak = self.consistent = 0
         self.last_accept = self.last_reject = self.last_downweight = None
         self.last_reacquire = self.last_frozen = self.last_reset = None
         self.z_prev = self.z_time = None
         self.frozen_ids: set[str] = set()
+        self.wheel_health: dict[str, WheelHealthState] = {}
+        self.health_recovery: dict[str, int] = {}
+        self.previous_wheels: dict[str, WheelSample] = {}
         self.hold = {}
         self.pending_reasons: set[str] = set()
         self.clamped = False
@@ -183,9 +291,26 @@ class AdaptiveOdometryEstimator:
     def ingest_wheel(self, sample: WheelSample):
         self._enqueue(sample)
 
+    def ingest_velocity_correction(self, sample: LongitudinalVelocityCorrection):
+        self._enqueue(sample)
+
+    def ingest_position_correction(self, sample: AlongTrackPositionCorrection):
+        self._enqueue(sample)
+
     def _enqueue(self, event):
         wheel = isinstance(event, WheelSample)
-        value = event.speed_mps if wheel else event.u
+        correction = isinstance(event, (LongitudinalVelocityCorrection, AlongTrackPositionCorrection))
+        if wheel:
+            value = event.speed_mps
+        elif isinstance(event, ControlSample):
+            value = event.u
+        elif isinstance(event, LongitudinalVelocityCorrection):
+            value = event.v_mps
+        else:
+            value = event.s_m
+        variance = event.variance_m2ps2 if isinstance(event, LongitudinalVelocityCorrection) else (
+            event.variance_m2 if isinstance(event, AlongTrackPositionCorrection) else None
+        )
         if (
             not isinstance(event.stamp_ns, int)
             or not isinstance(event.seq, int)
@@ -193,12 +318,22 @@ class AdaptiveOdometryEstimator:
             or event.seq < 0
             or not math.isfinite(value)
             or (wheel and (not event.wheel_id or value < 0))
-            or (not wheel and not -1 <= value <= 1)
+            or (isinstance(event, ControlSample) and not -1 <= value <= 1)
+            or (correction and (not event.source or not math.isfinite(variance) or variance <= 0))
+            or (isinstance(event, LongitudinalVelocityCorrection) and value < 0)
+            or (isinstance(event, AlongTrackPositionCorrection) and not event.route_id)
         ):
             self.pending_reasons.add("INVALID_INPUT")
             self.rejected += int(wheel)
             return
-        key = ("wheel", event.wheel_id, event.seq) if wheel else ("control", event.seq)
+        if wheel:
+            key = ("wheel", event.wheel_id, event.seq)
+        elif isinstance(event, ControlSample):
+            key = ("control", event.seq)
+        elif isinstance(event, LongitudinalVelocityCorrection):
+            key = ("velocity_correction", event.source, event.seq)
+        else:
+            key = ("position_correction", event.source, event.seq)
         if key in self.seen:
             self.pending_reasons.add("DUPLICATE")
             self.rejected += int(wheel)
@@ -219,6 +354,10 @@ class AdaptiveOdometryEstimator:
 
     def _command(self, u, v):
         c = self.config
+        if u > c.u_dead and c.traction_map is not None:
+            return c.traction_map.evaluate(u, v)
+        if u < -c.u_dead and c.braking_map is not None:
+            return c.braking_map.evaluate(u, v)
         drive, brake = max(u - c.u_dead, 0.0), max(-u - c.u_dead, 0.0)
         gain = 1.0 / (1.0 + v / c.v_sat)
         braking = min(1.0, v / c.v_brake) if v > 0 else 0.0
@@ -228,16 +367,34 @@ class AdaptiveOdometryEstimator:
             -c.kt * drive * gain * gain / c.v_sat - c.kb * brake * derivative,
         )
 
+    def _grade(self, s):
+        try:
+            grade = float(self.grade_provider(s))
+        except (TypeError, ValueError, OverflowError):
+            grade = 0.0
+        if not math.isfinite(grade):
+            grade = 0.0
+        if grade == 0.0:
+            return grade
+        return grade
+
     def _step(self, dt):
         c = self.config
         s, v, acceleration, disturbance = self.x
         decay = math.exp(-dt / c.tau_s)
         alpha = 1.0 - decay
         command, derivative = self._command(self.control or 0.0, v)
+        grade = self._grade(s)
         drag_derivative = c.c1 + 2 * c.c2 * abs(v)
         state = [
             s + v * dt,
-            v + (acceleration - c.c1 * v - c.c2 * v * abs(v) + disturbance) * dt,
+            v + (
+                acceleration
+                - c.c1 * v
+                - c.c2 * v * abs(v)
+                - GRAVITY_MPS2 * grade
+                + disturbance
+            ) * dt,
             acceleration + (command - acceleration) * alpha,
             disturbance,
         ]
@@ -253,6 +410,7 @@ class AdaptiveOdometryEstimator:
         if state[1] < 0:
             state[1] = 0.0
             self.clamped = True
+        state[3] = min(max(state[3], -c.disturbance_limit_mps2), c.disturbance_limit_mps2)
         self.x, self.P = state, covariance
 
     def _predict_to(self, stamp):
@@ -261,8 +419,10 @@ class AdaptiveOdometryEstimator:
         total = (stamp - self.t) / 1e9
         if total > self.config.max_gap_s:
             position = self.x[0]
+            route_id = self.route_id
             initial = InitialState(stamp, position, self.x[1])
             self.initialize(initial, self.config)
+            self.route_id = route_id
             self.last_reset = stamp
             return
         if total:
@@ -271,16 +431,25 @@ class AdaptiveOdometryEstimator:
                 self._step(total / count)
         self.t = stamp
 
-    def _update(self, measurement, variance, full=True):
-        innovation_variance = self.P[1][1] + variance
-        gain = [self.P[index][1] / innovation_variance for index in range(N)]
+    def _update(self, measurement, variance, h=(0.0, 1.0, 0.0, 0.0), full=True):
+        if len(h) != N or variance <= 0 or not all(math.isfinite(value) for value in (*h, measurement, variance)):
+            raise ValueError("Invalid scalar EKF measurement")
+        predicted = sum(h[index] * self.x[index] for index in range(N))
+        ph = [sum(self.P[index][j] * h[j] for j in range(N)) for index in range(N)]
+        innovation_variance = sum(h[index] * ph[index] for index in range(N)) + variance
+        if not math.isfinite(innovation_variance) or innovation_variance <= 0:
+            raise ValueError("Invalid innovation covariance")
+        gain = [value / innovation_variance for value in ph]
         if not full:
             gain[2] = gain[3] = 0.0
         if not self.config.adapt_disturbance:
             gain[3] = 0.0
-        error = measurement - self.x[1]
+        error = measurement - predicted
         self.x = [self.x[index] + gain[index] * error for index in range(N)]
-        ikh = [[(1.0 if i == j else 0.0) - (gain[i] if j == 1 else 0.0) for j in range(N)] for i in range(N)]
+        ikh = [
+            [(1.0 if i == j else 0.0) - gain[i] * h[j] for j in range(N)]
+            for i in range(N)
+        ]
         covariance = _mm(_mm(ikh, self.P), _transpose(ikh))
         for i in range(N):
             for j in range(N):
@@ -305,6 +474,75 @@ class AdaptiveOdometryEstimator:
             and abs(expected) >= self.config.freeze_min_accel
         )
 
+    def _set_health(self, wheel_id, state):
+        previous = self.wheel_health.get(wheel_id, WheelHealthState.UNKNOWN)
+        if state == WheelHealthState.NORMAL and previous not in (
+            WheelHealthState.NORMAL,
+            WheelHealthState.UNKNOWN,
+        ):
+            recovered = self.health_recovery.get(wheel_id, 0) + 1
+            self.health_recovery[wheel_id] = recovered
+            if recovered < self.config.recover_updates:
+                return previous
+        else:
+            self.health_recovery[wheel_id] = 0
+        self.wheel_health[wheel_id] = state
+        return state
+
+    def _classify_wheel(self, sample):
+        if not sample.valid:
+            return self._set_health(sample.wheel_id, WheelHealthState.UNKNOWN)
+        if self._is_frozen(sample):
+            self.frozen_ids.add(sample.wheel_id)
+            self.last_frozen = sample.stamp_ns
+            return self._set_health(sample.wheel_id, WheelHealthState.FROZEN)
+        previous = self.previous_wheels.get(sample.wheel_id)
+        self.previous_wheels[sample.wheel_id] = sample
+        if previous is not None and sample.stamp_ns > previous.stamp_ns:
+            derivative = (sample.speed_mps - previous.speed_mps) / (
+                (sample.stamp_ns - previous.stamp_ns) / 1e9
+            )
+            if abs(derivative) > self.config.max_wheel_accel:
+                return self._set_health(sample.wheel_id, WheelHealthState.INCONSISTENT)
+        innovation = sample.speed_mps - self.x[1]
+        gate = self.config.gate_sigma_cap + 3 * math.sqrt(self.config.wheel_variance_floor)
+        if innovation > gate and (self.control or 0.0) > self.config.u_dead:
+            return self._set_health(sample.wheel_id, WheelHealthState.POSITIVE_SLIP)
+        if innovation < -gate and (self.control or 0.0) < -self.config.u_dead:
+            return self._set_health(sample.wheel_id, WheelHealthState.BRAKING_SLIDE)
+        self.frozen_ids.discard(sample.wheel_id)
+        return self._set_health(sample.wheel_id, WheelHealthState.NORMAL)
+
+    def _correction_update(self, event):
+        position = isinstance(event, AlongTrackPositionCorrection)
+        if position and self.route_id is not None and event.route_id != self.route_id:
+            self.rejected_gnss_position += 1
+            self.pending_reasons.add("GNSS_ROUTE_MISMATCH")
+            return
+        measurement = event.s_m if position else event.v_mps
+        variance = event.variance_m2 if position else event.variance_m2ps2
+        index = 0 if position else 1
+        innovation_variance = self.P[index][index] + variance
+        nis = (measurement - self.x[index]) ** 2 / innovation_variance
+        threshold = (
+            self.config.position_correction_gate if position else self.config.velocity_correction_gate
+        )
+        if not math.isfinite(nis) or nis > threshold:
+            if position:
+                self.rejected_gnss_position += 1
+            else:
+                self.rejected_gnss_velocity += 1
+            self.pending_reasons.add("GNSS_CORRECTION_REJECTED")
+            return
+        h = (1.0, 0.0, 0.0, 0.0) if position else (0.0, 1.0, 0.0, 0.0)
+        self._update(measurement, variance, h=h)
+        if position:
+            self.route_id = event.route_id
+            self.accepted_gnss_position += 1
+        else:
+            self.accepted_gnss_velocity += 1
+        self.last_gnss = event.stamp_ns
+
     def _process_group(self, stamp, events):
         self._predict_to(stamp)
         candidates = []
@@ -314,20 +552,24 @@ class AdaptiveOdometryEstimator:
                 self.control_valid = event.valid
                 self.last_control = stamp
                 continue
+            if isinstance(event, (LongitudinalVelocityCorrection, AlongTrackPositionCorrection)):
+                self._correction_update(event)
+                continue
             if event.wheel_id not in self.channels and len(self.channels) >= self.config.max_channels:
                 self.pending_reasons.add("CHANNEL_LIMIT")
                 self.rejected += 1
                 continue
             self.channels[event.wheel_id] = event
             if not event.valid:
-                self.rejected += 1
-            elif self._is_frozen(event):
-                self.frozen_ids.add(event.wheel_id)
-                self.last_frozen = stamp
+                self._set_health(event.wheel_id, WheelHealthState.UNKNOWN)
                 self.rejected += 1
             else:
-                self.frozen_ids.discard(event.wheel_id)
-                candidates.append(event)
+                state = self._classify_wheel(event)
+                if state == WheelHealthState.NORMAL:
+                    candidates.append(event)
+                else:
+                    self.rejected += 1
+                    self.last_reject = stamp
         if not candidates or not self.config.use_wheels:
             return
         if self.config.robust and self.config.channel_gate and len(candidates) >= 2:
@@ -338,6 +580,15 @@ class AdaptiveOdometryEstimator:
                 if (item.speed_mps - self.x[1]) ** 2 / variance <= self.config.gate_normal
             ]
             if inliers and len(inliers) < len(candidates):
+                rejected_ids = {item.wheel_id for item in candidates if item not in inliers}
+                for wheel_id in rejected_ids:
+                    event = next(item for item in candidates if item.wheel_id == wheel_id)
+                    if event.speed_mps > self.x[1] and (self.control or 0.0) > self.config.u_dead:
+                        self._set_health(wheel_id, WheelHealthState.POSITIVE_SLIP)
+                    elif event.speed_mps < self.x[1] and (self.control or 0.0) < -self.config.u_dead:
+                        self._set_health(wheel_id, WheelHealthState.BRAKING_SLIDE)
+                    else:
+                        self._set_health(wheel_id, WheelHealthState.INCONSISTENT)
                 self.rejected += len(candidates) - len(inliers)
                 self.last_reject = stamp
                 candidates = inliers
@@ -406,8 +657,12 @@ class AdaptiveOdometryEstimator:
             for key, sample in self.channels.items()
             if sample.valid
             and key not in self.frozen_ids
+            and self.wheel_health.get(key) == WheelHealthState.NORMAL
             and stamp_ns - sample.stamp_ns <= round(c.wheel_timeout_s * 1e9)
         }
+        for key, sample in self.channels.items():
+            if stamp_ns - sample.stamp_ns > round(c.wheel_timeout_s * 1e9):
+                self._set_health(key, WheelHealthState.DROPOUT)
         wheel_age = min(
             (
                 (stamp_ns - sample.stamp_ns) / 1e9
@@ -461,7 +716,13 @@ class AdaptiveOdometryEstimator:
         covariance = [item for row in self.P for item in row] if finite else None
         velocity = self.x[1] if finite else None
         acceleration = (
-            self.x[2] - c.c1 * velocity - c.c2 * velocity * abs(velocity) + self.x[3] if finite else None
+            self.x[2]
+            - c.c1 * velocity
+            - c.c2 * velocity * abs(velocity)
+            - GRAVITY_MPS2 * self._grade(self.x[0])
+            + self.x[3]
+            if finite
+            else None
         )
         return Estimate(
             stamp_ns=stamp_ns,
@@ -484,5 +745,11 @@ class AdaptiveOdometryEstimator:
             sigma_v_mps=math.sqrt(max(self.P[1][1], 0)) if finite else None,
             a_mps2=acceleration,
             disturbance_mps2=self.x[3] if finite else None,
-            model_version=self.MODEL_VERSION,
+            wheel_health={key: state.value for key, state in self.wheel_health.items()},
+            route_id=self.route_id,
+            accepted_gnss_velocity_count=self.accepted_gnss_velocity,
+            rejected_gnss_velocity_count=self.rejected_gnss_velocity,
+            accepted_gnss_position_count=self.accepted_gnss_position,
+            rejected_gnss_position_count=self.rejected_gnss_position,
+            model_version=c.model_version,
         )

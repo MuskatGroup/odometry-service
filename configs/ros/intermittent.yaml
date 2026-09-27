@@ -1,0 +1,9 @@
+reserve_odometry:
+  ros__parameters:
+    gnss_policy: intermittent
+    publish_rate_hz: 50.0
+    processing_delay_ms: 20.0
+    max_model_only_s: 10.0
+    gnss_sync_tolerance_ms: 200.0
+    gnss_cross_track_gate_m: 8.0
+    gnss_baseline_error_gate_m: 1.0

@@ -30,7 +30,7 @@ def domain_event(msg):
     return WheelSample(ns(msg.header.stamp), msg.seq, msg.wheel_id, msg.speed_mps, msg.valid)
 
 
-def estimate_message(estimate, run_id, compute_ms):
+def estimate_message(estimate, run_id, compute_ms, map_pose=None, gnss_policy="disabled", gnss_age_s=None):
     msg = LongitudinalEstimate()
     set_stamp(msg.header, estimate.stamp_ns)
     msg.header.frame_id = "odom_1d"
@@ -41,8 +41,14 @@ def estimate_message(estimate, run_id, compute_ms):
     msg.uncertainty_available = estimate.uncertainty_available
     msg.covariance_4x4 = estimate.covariance_4x4 or [0.0] * 16
     msg.sigma_s_m, msg.sigma_v_mps = float(estimate.sigma_s_m or 0), float(estimate.sigma_v_mps or 0)
+    msg.has_acceleration = estimate.a_mps2 is not None
+    msg.a_mps2 = float(estimate.a_mps2 or 0)
+    msg.has_disturbance = estimate.disturbance_mps2 is not None
+    msg.disturbance_mps2 = float(estimate.disturbance_mps2 or 0)
     msg.wheel_ids = list(estimate.wheel_speeds_mps)
     msg.wheel_speeds_mps = list(estimate.wheel_speeds_mps.values())
+    msg.wheel_health_ids = sorted(estimate.wheel_health)
+    msg.wheel_health_states = [estimate.wheel_health[key] for key in msg.wheel_health_ids]
     msg.has_control = estimate.control_u is not None
     msg.control_u = float(estimate.control_u or 0)
     for field in ("control_age", "wheel_age"):
@@ -52,6 +58,20 @@ def estimate_message(estimate, run_id, compute_ms):
     msg.model_only_duration_s = estimate.model_only_duration_s
     msg.accepted_wheel_count = estimate.accepted_wheel_count
     msg.rejected_wheel_count = estimate.rejected_wheel_count
+    msg.route_id = estimate.route_id or ""
+    msg.has_map_pose = map_pose is not None
+    if map_pose is not None:
+        msg.map_x_m = float(map_pose.x_m)
+        msg.map_y_m = float(map_pose.y_m)
+        msg.map_z_m = float(map_pose.z_m)
+        msg.yaw_rad = float(map_pose.yaw_rad)
+    msg.gnss_policy = gnss_policy
+    msg.has_gnss_age = gnss_age_s is not None
+    msg.gnss_age_s = float(gnss_age_s or 0)
+    msg.accepted_gnss_velocity_count = estimate.accepted_gnss_velocity_count
+    msg.rejected_gnss_velocity_count = estimate.rejected_gnss_velocity_count
+    msg.accepted_gnss_position_count = estimate.accepted_gnss_position_count
+    msg.rejected_gnss_position_count = estimate.rejected_gnss_position_count
     msg.model_version, msg.compute_ms = estimate.model_version, compute_ms
     return msg
 
@@ -73,6 +93,7 @@ def frame_dict(msg):
         "sigma_v_mps": msg.sigma_v_mps if msg.uncertainty_available else None,
         "covariance_4x4": list(msg.covariance_4x4) if msg.uncertainty_available else None,
         "wheel_speeds_mps": dict(zip(msg.wheel_ids, msg.wheel_speeds_mps)),
+        "wheel_health": dict(zip(msg.wheel_health_ids, msg.wheel_health_states)),
         "control_u": msg.control_u if msg.has_control else None,
         "control_age_s": msg.control_age_s if msg.has_control_age else None,
         "wheel_age_s": msg.wheel_age_s if msg.has_wheel_age else None,
@@ -81,4 +102,19 @@ def frame_dict(msg):
         "model_only_duration_s": msg.model_only_duration_s,
         "accepted_wheel_count": msg.accepted_wheel_count,
         "rejected_wheel_count": msg.rejected_wheel_count,
+        "a_mps2": msg.a_mps2 if msg.has_acceleration else None,
+        "disturbance_mps2": msg.disturbance_mps2 if msg.has_disturbance else None,
+        "route_id": msg.route_id or None,
+        "map_pose": ({
+            "x_m": msg.map_x_m,
+            "y_m": msg.map_y_m,
+            "z_m": msg.map_z_m,
+            "yaw_rad": msg.yaw_rad,
+        } if msg.has_map_pose else None),
+        "gnss_policy": msg.gnss_policy,
+        "gnss_age_s": msg.gnss_age_s if msg.has_gnss_age else None,
+        "accepted_gnss_velocity_count": msg.accepted_gnss_velocity_count,
+        "rejected_gnss_velocity_count": msg.rejected_gnss_velocity_count,
+        "accepted_gnss_position_count": msg.accepted_gnss_position_count,
+        "rejected_gnss_position_count": msg.rejected_gnss_position_count,
     }

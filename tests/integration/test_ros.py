@@ -102,3 +102,77 @@ def test_ros_and_bag_match_offline(tmp_path):
         node.destroy_node()
         estimator.destroy_node()
         rclpy.shutdown()
+
+
+def test_reserve_node_uses_organizer_contracts_and_si_outputs():
+    import rclpy
+    from nav_msgs.msg import Odometry
+    from odometry_core import ModelConfig
+    from odometry_node.runtime import ReserveOdometryNode
+    from rclpy.executors import SingleThreadedExecutor
+    from rclpy.node import Node
+    from rclpy.parameter import Parameter
+
+    from tram_vehicle_msgs.msg import DriverControllerCommand, VelocitySensor
+
+    class Pose:
+        x_m = 103500.0
+        y_m = 85876.0
+        z_m = 164.0
+        yaw_rad = 0.0
+
+    class Geometry:
+        def grade_at(self, route_id, s_m):
+            return 0.0
+
+        def body_pose_at(self, route_id, s_m):
+            pose = Pose()
+            pose.x_m += s_m
+            return pose
+
+    rclpy.init()
+    source = Node("organizer_source")
+    node = ReserveOdometryNode(
+        geometry=Geometry(),
+        model_config=ModelConfig(control_timeout_s=None),
+        parameter_overrides=[
+            Parameter("route_id", value="route-a"),
+            Parameter("initial_v_mps", value=10.0),
+            Parameter("processing_delay_ms", value=0.0),
+        ],
+    )
+    executor = SingleThreadedExecutor()
+    executor.add_node(source)
+    executor.add_node(node)
+    controls = source.create_publisher(DriverControllerCommand, "/vehicle/driver_position_cmd", 10)
+    front = source.create_publisher(VelocitySensor, "/vehicle/front_bogie_velocity", 10)
+    rear = source.create_publisher(VelocitySensor, "/vehicle/rear_bogie_velocity", 10)
+    velocities, positions = [], []
+    source.create_subscription(VelocitySensor, "/result/velocity", velocities.append, 10)
+    source.create_subscription(Odometry, "/result/position", positions.append, 10)
+    try:
+        deadline = time.monotonic() + 10
+        while front.get_subscription_count() < 1 and time.monotonic() < deadline:
+            executor.spin_once(timeout_sec=0.02)
+        assert front.get_subscription_count() == rear.get_subscription_count() == 1
+        now = source.get_clock().now().to_msg()
+        control = DriverControllerCommand()
+        control.header.stamp = now
+        control.position = 0
+        wheel = VelocitySensor()
+        wheel.header.stamp = now
+        wheel.velocity = 36.0
+        controls.publish(control)
+        front.publish(wheel)
+        rear.publish(wheel)
+        deadline = time.monotonic() + 5
+        while (not velocities or not positions) and time.monotonic() < deadline:
+            executor.spin_once(timeout_sec=0.02)
+        assert velocities[-1].velocity == pytest.approx(10.0, abs=0.2)
+        assert positions[-1].header.frame_id == "map"
+        assert positions[-1].child_frame_id == "base_link"
+    finally:
+        executor.shutdown()
+        source.destroy_node()
+        node.destroy_node()
+        rclpy.shutdown()

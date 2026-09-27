@@ -1,0 +1,6 @@
+reserve_odometry:
+  ros__parameters:
+    gnss_policy: disabled
+    publish_rate_hz: 50.0
+    processing_delay_ms: 20.0
+    max_model_only_s: 10.0

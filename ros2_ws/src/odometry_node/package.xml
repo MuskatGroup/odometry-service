@@ -6,6 +6,8 @@
   <buildtool_depend>ament_python</buildtool_depend>
   <exec_depend>rclpy</exec_depend><exec_depend>odometry_msgs</exec_depend>
   <exec_depend>nav_msgs</exec_depend><exec_depend>diagnostic_msgs</exec_depend>
+  <exec_depend>tram_vehicle_msgs</exec_depend><exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>rosgraph_msgs</exec_depend><exec_depend>rosidl_runtime_py</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <export><build_type>ament_python</build_type></export>

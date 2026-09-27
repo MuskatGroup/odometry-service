@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Run report v0.3",
+  "description": "Written by odometry_lab (evaluate / real-run) and read by the console. Metrics that cannot be computed are null, never 0. Blocks marked optional are absent for synthetic runs.",
+  "type": "object",
+  "required": ["schema_version", "metrics", "unavailable_reason", "incidents", "fault_windows"],
+  "properties": {
+    "schema_version": { "const": "0.3" },
+    "metrics": {
+      "type": "object",
+      "description": "Speed/position errors against the reference, availability and mode shares. Values are numbers or null.",
+      "additionalProperties": { "type": ["number", "null", "object"] }
+    },
+    "unavailable_reason": { "type": ["string", "null"], "description": "Set (e.g. NO_INDEPENDENT_TRUTH) when no reference exists" },
+    "truth": {
+      "type": "array",
+      "description": "Reference used for scoring: GNSS-derived speed and along-track position relative to the run start",
+      "items": {
+        "type": "object",
+        "required": ["stamp_ns", "v_mps", "s_m"],
+        "properties": {
+          "stamp_ns": { "type": "string", "pattern": "^[0-9]+$" },
+          "v_mps": { "type": "number" },
+          "s_m": { "type": "number" }
+        }
+      }
+    },
+    "incidents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["stamp_ns", "mode", "description"],
+        "properties": {
+          "stamp_ns": { "type": "string" },
+          "mode": { "type": "string" },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "fault_windows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type", "start_ns", "end_ns"],
+        "properties": {
+          "type": { "type": "string" },
+          "start_ns": { "type": "string" },
+          "end_ns": { "type": "string" },
+          "position_drift_m": { "type": "number" },
+          "max_speed_error_mps": { "type": "number" }
+        }
+      }
+    },
+    "scenario": {
+      "description": "Optional. Which real bag, fault and preset produced the run",
+      "type": "object",
+      "required": ["name", "fault", "channels", "bag", "vehicle_id", "preset", "window_s"],
+      "properties": {
+        "name": { "type": "string" },
+        "fault": { "enum": ["none", "freeze", "dropout", "spike", "slip", "lock"] },
+        "channels": { "type": "array", "items": { "enum": ["front", "rear"] } },
+        "bag": { "type": "string" },
+        "vehicle_id": { "type": "string" },
+        "preset": { "type": "string" },
+        "window_s": { "type": "number" }
+      }
+    },
+    "reference": {
+      "description": "Optional. Where the truth came from and how much of the excerpt it covers",
+      "type": "object",
+      "required": ["source", "coverage"],
+      "properties": {
+        "source": { "type": "string" },
+        "coverage": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "map": {
+      "description": "Optional. Coordinates are continuous MGRS metres for square 37UCB (x east, y north); tracks are the projection of along-track position onto route_id",
+      "type": "object",
+      "required": ["frame", "route_id", "routes", "reference", "estimate"],
+      "properties": {
+        "frame": { "type": "string" },
+        "route_id": { "type": ["string", "null"] },
+        "routes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["route_id", "xy"],
+            "properties": {
+              "route_id": { "type": "string" },
+              "xy": { "type": "array", "items": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 } }
+            }
+          }
+        },
+        "reference": { "$ref": "#/$defs/track" },
+        "estimate": { "$ref": "#/$defs/track" }
+      }
+    },
+    "corrections": {
+      "description": "Optional. GNSS corrections; available=false means the estimator core does not accept them yet (not that none were needed)",
+      "type": "object",
+      "required": ["available", "accepted", "rejected"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "reason": { "type": "string" },
+        "accepted": { "type": "array" },
+        "rejected": { "type": "array" }
+      }
+    }
+  },
+  "$defs": {
+    "track": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["stamp_ns", "x_m", "y_m"],
+        "properties": {
+          "stamp_ns": { "type": "string" },
+          "x_m": { "type": "number" },
+          "y_m": { "type": "number" }
+        }
+      }
+    }
+  }
+}

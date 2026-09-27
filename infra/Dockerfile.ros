@@ -10,6 +10,8 @@ RUN pip3 install --no-cache-dir ./python/odometry_core ./python/odometry_io ./py
 COPY ros2_ws/ ros2_ws/
 RUN source /opt/ros/humble/setup.bash && cd ros2_ws && colcon build
 COPY contracts/ contracts/
+COPY configs/ configs/
+COPY dataset/Pathgraph/ dataset/Pathgraph/
 COPY tests/ tests/
 COPY infra/ros-entrypoint.sh /ros-entrypoint.sh
 RUN chmod +x /ros-entrypoint.sh
