@@ -38,7 +38,7 @@ Production-запуск без `model_config` завершается ошибк�
 ```bash
 ros2 launch odometry_node reserve.launch.py \
   vehicle_id:=30618 \
-  route_id:=tallinskaya-shchukinskaya \
+  route_id:=tallinskaya_to_shchukinskaya \
   s0:=0.0 \
   gnss_policy:=disabled \
   pathgraph_directory:=/workspace/dataset/Pathgraph \
@@ -80,7 +80,7 @@ ros2 run odometry_node reserve_odometry_node --ros-args \
   --params-file /workspace/configs/ros/disabled.yaml \
   -p use_sim_time:=true \
   -p vehicle_id:=30618 \
-  -p route_id:=tallinskaya-shchukinskaya \
+  -p route_id:=tallinskaya_to_shchukinskaya \
   -p s0:=0.0 \
   -p pathgraph_directory:=/workspace/dataset/Pathgraph \
   -p model_config:=/workspace/configs/models

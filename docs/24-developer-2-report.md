@@ -14,7 +14,7 @@
 разделом 5 плана.
 
 - **Pathgraph.** Загрузка двух JSON, стабильные ASCII-имена маршрутов
-  (`tallinskaya-shchukinskaya`, `shchukinskaya-tallinskaya`), длина каждого около 4709 м.
+  (`tallinskaya_to_shchukinskaya`, `shchukinskaya_to_tallinskaya`), длина каждого около 4709 м.
   `pose_at`, `body_pose_at`, `project` со статусами `MATCHED`, `AMBIGUOUS`, `OUT_OF_GRAPH`.
   За границей карты точка не прижимается к концу маршрута.
 - **WGS84 в MGRS 37UCB.** Непрерывные метры без деления по модулю. Контрольная точка

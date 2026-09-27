@@ -1,3 +1,4 @@
+import json
 import math
 import sys
 from pathlib import Path
@@ -152,6 +153,64 @@ def test_body_pose_yaw_from_bogie_chord_and_start_extrapolation():
         g.body_pose_at("r", g.length_m("r") + 1.0)
 
 
+def _write_pathgraph_document(tmp_path, document, name="таллинская - щукинская.json"):
+    file = tmp_path / name
+    file.write_text(json.dumps(document), encoding="utf-8")
+    return file
+
+
+def test_route_id_stable_for_renamed_or_recased_file(tmp_path):
+    # requirement 9: route_id must not depend on the exact filename text, only on which of the
+    # two known organizer routes the file is. A case change and extra whitespace must not change
+    # the resolved id.
+    document = {"points": straight_route()[:2], "paths": [{"ext_id": None, "point_indices": [0, 1]}]}
+    _write_pathgraph_document(tmp_path, document, name="  ТАЛЛИНСКАЯ -  Щукинская  .json")
+    graph = PathGraph.from_directory(tmp_path)
+    assert graph.route_ids == ("tallinskaya_to_shchukinskaya",)
+
+
+def test_unmapped_filename_demands_curated_table_update(tmp_path):
+    document = {"points": straight_route()[:2], "paths": [{"ext_id": None, "point_indices": [0, 1]}]}
+    _write_pathgraph_document(tmp_path, document, name="some_new_route.json")
+    with pytest.raises(ValueError, match="curated route id table"):
+        PathGraph.from_directory(tmp_path)
+
+
+def test_missing_paths_key_is_rejected(tmp_path):
+    _write_pathgraph_document(tmp_path, {"points": straight_route()[:2]})
+    with pytest.raises(ValueError, match="paths"):
+        PathGraph.from_directory(tmp_path)
+
+
+def test_non_list_point_indices_is_rejected(tmp_path):
+    document = {"points": straight_route()[:2], "paths": [{"ext_id": None, "point_indices": "0,1"}]}
+    _write_pathgraph_document(tmp_path, document)
+    with pytest.raises(ValueError, match="point_indices"):
+        PathGraph.from_directory(tmp_path)
+
+
+def test_out_of_bounds_point_index_is_rejected(tmp_path):
+    document = {"points": straight_route()[:2], "paths": [{"ext_id": None, "point_indices": [0, 5]}]}
+    _write_pathgraph_document(tmp_path, document)
+    with pytest.raises(ValueError, match="out of bounds"):
+        PathGraph.from_directory(tmp_path)
+
+
+def test_paths_reorders_points_rather_than_using_raw_points_order(tmp_path):
+    # points is stored back-to-front in the file; point_indices recovers the forward route.
+    # If the loader used document["points"] directly (ignoring paths) pose_at(0.0) would land
+    # on the *last* raw point instead of the true first point of the route.
+    raw_points = straight_route(n=5)
+    shuffled_points = list(reversed(raw_points))
+    point_indices = list(reversed(range(len(shuffled_points))))
+    document = {"points": shuffled_points, "paths": [{"ext_id": None, "point_indices": point_indices}]}
+    _write_pathgraph_document(tmp_path, document)
+    graph = PathGraph.from_directory(tmp_path)
+    pose0 = graph.pose_at("tallinskaya_to_shchukinskaya", 0.0)
+    assert pose0.x_m == pytest.approx(raw_points[0]["x"])
+    assert pose0.y_m == pytest.approx(raw_points[0]["y"])
+
+
 def test_invalid_pathgraph_is_rejected(tmp_path):
     with pytest.raises(ValueError):
         PathGraph({})
@@ -224,7 +283,7 @@ def real_graph():
 
 
 def test_real_pathgraph_routes_and_ascii_ids(real_graph):
-    assert real_graph.route_ids == ("shchukinskaya-tallinskaya", "tallinskaya-shchukinskaya")
+    assert real_graph.route_ids == ("shchukinskaya_to_tallinskaya", "tallinskaya_to_shchukinskaya")
     for rid in real_graph.route_ids:
         assert rid.isascii()
         assert 4600 < real_graph.length_m(rid) < 4800
