@@ -30,6 +30,9 @@ class GeometryAdapter:
         self.config = geometry.ProjectionConfig()
         self.tram = geometry.TramGeometry()
 
+    def length_m(self, route_id):
+        return self.graph.length_m(route_id)
+
     def pose_at(self, route_id, s_m):
         try:
             return self.graph.pose_at(route_id, s_m)

@@ -40,6 +40,14 @@ _ROUTE_ID_BY_STEM = {
 }
 
 
+def normalize_route_id(route_id: str | None) -> str | None:
+    """Read pre-migration reference tables without changing their numeric coordinates."""
+    return {
+        "tallinskaya-shchukinskaya": "tallinskaya_to_shchukinskaya",
+        "shchukinskaya-tallinskaya": "shchukinskaya_to_tallinskaya",
+    }.get(route_id, route_id)
+
+
 def _normalize_stem(stem: str) -> str:
     return " ".join(stem.casefold().split())
 

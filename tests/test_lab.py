@@ -70,6 +70,29 @@ from odometry_lab.calibrate import config_from_profile  # noqa: E402
 NS = 1_000_000_000
 
 
+@pytest.mark.parametrize("old,new", [
+    ("tallinskaya-shchukinskaya", "tallinskaya_to_shchukinskaya"),
+    ("shchukinskaya-tallinskaya", "shchukinskaya_to_tallinskaya"),
+    ("tallinskaya_to_shchukinskaya", "tallinskaya_to_shchukinskaya"),
+])
+def test_reference_route_migration_preserves_coordinates_and_grade(tmp_path, old, new):
+    from odometry_geometry import PathGraph
+
+    reference = tmp_path / "reference.csv"
+    reference.write_text(f"stamp_ns,v_ref,s_ref,route_id\n100,4.5,100.25,{old}\n")
+    row = rd.load_reference(reference)[0]
+    assert (row["route"], row["v"], row["s"]) == (new, 4.5, 100.25)
+    graph = PathGraph.from_directory(ROOT / "dataset/Pathgraph")
+    assert graph.pose_at(row["route"], row["s"]).grade == graph.pose_at(new, 100.25).grade
+
+
+def test_unknown_reference_route_is_not_silently_treated_as_flat():
+    case = rd.RealCase("test", "default", rd.Window(0, NS), [], [], InitialState(0), 1.0,
+                       route_id="unknown-route")
+    with pytest.raises(ValueError, match="Unknown reference route"):
+        rd.run_real_events(case, [])
+
+
 def wheel_stream(seconds=10, hz=10):
     out = []
     for k in range(seconds * hz):
@@ -155,7 +178,7 @@ def test_gnss_reference_is_converted_to_ordered_corrections_and_ingested():
         truth=truth,
         initial=InitialState(stamps[0], 0.0, 5.0),
         reference_coverage=1.0,
-        route_id="route-a",
+        route_id=None,  # Synthetic correction coordinates have no physical Pathgraph route.
     )
 
     corrections = rd.correction_events(case, "initial")

@@ -121,6 +121,9 @@ def test_reserve_node_uses_organizer_contracts_and_si_outputs():
         yaw_rad = 0.0
 
     class Geometry:
+        def length_m(self, route_id):
+            return 10000.0
+
         def grade_at(self, route_id, s_m):
             return 0.0
 

@@ -25,6 +25,7 @@ from odometry_core import (
     WheelSample,
 )
 from odometry_core.types import event_key
+from odometry_geometry import normalize_route_id
 
 from .benchmark import PRESETS
 from .evaluate import evaluate
@@ -47,7 +48,11 @@ SCENARIOS: dict[str, tuple[str, tuple[str, ...]]] = {
     "dropout-2": ("dropout", ("front", "rear")),
     "spike-1": ("spike", ("front",)),
     "slip-1": ("slip", ("front",)),
+    "slip-2": ("slip", ("front", "rear")),
+    "slide-1": ("slide", ("front",)),
+    "slide-2": ("slide", ("front", "rear")),
     "lock-1": ("lock", ("front",)),
+    "lock-2": ("lock", ("front", "rear")),
 }
 GNSS_MODES = ("never", "initial", "intermittent-30", "intermittent-60", "intermittent-120")
 
@@ -87,7 +92,7 @@ def load_reference(path: str | Path) -> list[dict]:
                     "stamp_ns": int(row["stamp_ns"]),
                     "v": float(row["v_ref"]) if row["v_ref"] else None,
                     "s": float(row["s_ref"]) if row["s_ref"] else None,
-                    "route": row.get("route_id") or None,
+                    "route": normalize_route_id(row.get("route_id") or None),
                     "velocity_sigma": (
                         float(row["reference_uncertainty"])
                         if row.get("reference_uncertainty")
@@ -182,13 +187,15 @@ def run_real_events(case, events, model_config=None, estimator_name="adaptive-ek
     from odometry_geometry import OutOfGraphError, PathGraph
 
     graph = PathGraph.from_directory(REPO / "dataset/Pathgraph")
+    if case.route_id is not None and case.route_id not in graph.route_ids:
+        raise ValueError(f"Unknown reference route {case.route_id!r}; rebuild the GNSS reference table")
 
     def grade(relative_s):
         if case.route_id is None:
             return 0.0
         try:
             return graph.pose_at(case.route_id, case.s0_m + relative_s).grade
-        except (KeyError, OutOfGraphError):
+        except OutOfGraphError:
             return 0.0
 
     return run_events(
@@ -204,7 +211,7 @@ def inject(events: list, kind: str, channels: tuple[str, ...], start_ns: int, en
     """Return a copy of ``events`` with the fault applied to wheel channels inside [start, end)."""
     if kind == "none":
         return list(events)
-    if kind not in {"freeze", "dropout", "spike", "slip", "lock"}:
+    if kind not in {"freeze", "dropout", "spike", "slip", "slide", "lock"}:
         raise ValueError(f"Unknown fault: {kind}")
     out, frozen, counter = [], {}, {}
     for event in events:
@@ -226,6 +233,8 @@ def inject(events: list, kind: str, channels: tuple[str, ...], start_ns: int, en
             speed = 0.0
         elif kind == "slip":
             speed *= 1.5
+        elif kind == "slide":
+            speed *= 0.5
         elif kind == "spike" and counter[event.wheel_id] % 5 == 0:
             speed += 6.0
         out.append(dataclasses.replace(event, speed_mps=speed))
@@ -410,6 +419,8 @@ def run_case(
         "speed_p95_abs_mps": metrics["speed_p95_abs_mps"],
         "position_rmse_m": metrics["position_rmse_m"],
         "final_position_error_m": metrics["final_position_error_m"],
+        "distance_traveled_m": metrics["distance_traveled_m"],
+        "final_drift_pct_of_distance": metrics["final_drift_pct_of_distance"],
         "availability": metrics["valid_fraction"],
         "model_only_fraction": model_only,
         "recovery_s": recovery_time_s(frames, case.truth, end) if kind != "none" else None,
@@ -425,7 +436,8 @@ def run_case(
 def summarize(rows: list[dict]) -> list[dict]:
     """Mean over bags for each (scenario, preset, GNSS mode); missing metrics stay None."""
     keys = ("speed_rmse_mps", "speed_bias_mps", "speed_p95_abs_mps", "position_rmse_m",
-            "final_position_error_m", "availability", "model_only_fraction", "recovery_s")  # fmt: skip
+            "final_position_error_m", "final_drift_pct_of_distance", "availability",
+            "model_only_fraction", "recovery_s")  # fmt: skip
     grouped: dict[tuple[str, str, str], list[dict]] = {}
     for row in rows:
         grouped.setdefault((row["scenario"], row["preset"], row.get("gnss_mode", "never")), []).append(row)
@@ -433,7 +445,7 @@ def summarize(rows: list[dict]) -> list[dict]:
     for (scenario, preset, gnss_mode), items in grouped.items():
         entry = {"scenario": scenario, "preset": preset, "gnss_mode": gnss_mode, "bags": len(items)}
         for key in keys:
-            values = [i[key] for i in items if i[key] is not None]
+            values = [i[key] for i in items if i.get(key) is not None]
             entry[key] = sum(values) / len(values) if values else None
         out.append(entry)
     return out

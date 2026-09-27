@@ -274,7 +274,7 @@ class ReserveOdometryNode(Node):
         if not route_id:
             return 0.0
         try:
-            length = self.geometry.graph.length_m(route_id)
+            length = self.geometry.length_m(route_id)
         except KeyError:
             self._warn_throttled(
                 "unknown_route",
@@ -576,25 +576,13 @@ class ReserveOdometryNode(Node):
             velocity.header.frame_id = "base_link"
             velocity.velocity = result.v_mps
             self.velocity_publisher.publish(velocity)
-        # Publish policy (organizer audit, 2026-09-27, section "Семантика недействительной
-        # позиции"): nav_msgs/Odometry carries no validity flag of its own and the checker scores
-        # every received sample as a normal estimate, but it does not penalize a sample we never
-        # send at all -- so "publish something" is only the right call while that something is
-        # still likely to be closer to the truth than silence. Position only needs a known route
-        # and a finite s (map_pose implies both, and rules out passing None into _odometry below)
-        # and must not be withheld just because the *velocity* side is merely degraded (wheel
-        # staleness, ordinary short model-only coasting, ...): those still leave decent position
-        # estimates. The one case it must be withheld is MODEL_ONLY_HORIZON: once we have been
-        # extrapolating with no fresh measurement at all for longer than max_model_only_s, further
-        # open-loop prediction is no longer a position estimate worth grading, and every extra
-        # published sample only drags the RMSE down for a true one that we could have left
-        # unmatched instead.
-        if map_pose is not None and result.covariance_4x4 is not None:
-            if "MODEL_ONLY_HORIZON" not in result.reason_codes:
-                self.position_publisher.publish(self._odometry(result, map_pose, stamp))
-                self.position_published_count += 1
-            else:
-                self.position_withheld_horizon_count += 1
+        # Keep both required output streams continuous through wheel failures. The
+        # frame distinguishes a map pose from relative/along-track coordinates;
+        # covariance and /odometry/estimate carry uncertainty and validity. A
+        # missing estimate must never be used to improve a reported error metric.
+        if result.s_m is not None and result.covariance_4x4 is not None:
+            self.position_publisher.publish(self._odometry(result, map_pose, stamp))
+            self.position_published_count += 1
         # End-to-end latency (fix/runtime-validation): match each input's own receipt time to the
         # publish that actually carried its effect, rather than the tick's own start-to-now gap
         # (761a0af's input_to_publication_ms was that gap and read ~0 on every healthy run -- see

@@ -74,6 +74,31 @@ def test_latency_includes_time_waiting_for_publication(runtime):
     assert len(runtime.latency_ms) == 1
 
 
+@pytest.mark.parametrize("known_route", [False, True])
+def test_position_stream_continues_after_model_only_horizon(runtime, known_route):
+    from types import SimpleNamespace
+
+    from odometry_core import ControlSample, InitialState
+
+    positions = []
+    runtime.position_publisher = SimpleNamespace(publish=positions.append)
+    if known_route:
+        runtime.route_id = "test-route"
+        runtime.geometry = SimpleNamespace(
+            body_pose_at=lambda route, s: SimpleNamespace(x_m=s, y_m=2.0, z_m=3.0, yaw_rad=0.0),
+        )
+    runtime.estimator.initialize(InitialState(0, 0.0, 5.0))
+    runtime.estimator.ingest_control(ControlSample(0, 0, 0.0))
+    for stamp in (20_000_000, 11_000_000_000):
+        result = runtime.estimator.advance_to(stamp)
+        runtime._publish(result, stamp, 0.1)
+    assert not result.valid and "MODEL_ONLY_HORIZON" in result.reason_codes
+    assert len(positions) == 2
+    assert positions[-1].header.frame_id == ("map" if known_route else "odom")
+    assert positions[-1].pose.pose.position.x > positions[0].pose.pose.position.x
+    assert runtime.position_withheld_horizon_count == 0
+
+
 def test_initialization_window_closes_without_accepted_fix(runtime):
     runtime.gnss_policy = "initialization_only"
     runtime.input_origin_stamp = 1_000_000_000
@@ -113,6 +138,9 @@ def test_gnss_close_is_safe_with_inflight_multithreaded_callbacks():
     from sensor_msgs.msg import NavSatFix
 
     class Geometry:
+        def length_m(self, route_id):
+            return 10000.0
+
         def observe_dual(self, *args):
             return GnssMapObservation("route-a", 3000.0, 1, 2, 3, 0, 0, 0)
 

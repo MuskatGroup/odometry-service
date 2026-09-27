@@ -8,6 +8,8 @@ import math
 from bisect import bisect_left
 from pathlib import Path
 
+from odometry_geometry import normalize_route_id
+
 
 def summarize(errors):
     return {
@@ -24,6 +26,9 @@ def score(directory, reference_path, route_id=None, max_gap_s=0.5):
     """Interpolate only between valid, same-route reference epochs with a bounded gap."""
     with Path(reference_path).open() as handle:
         rows = list(csv.DictReader(handle))
+    route_id = normalize_route_id(route_id)
+    for row in rows:
+        row["route_id"] = normalize_route_id(row.get("route_id") or None)
     rows.sort(key=lambda r: int(r["stamp_ns"]))
     times = [int(r["stamp_ns"]) for r in rows]
 

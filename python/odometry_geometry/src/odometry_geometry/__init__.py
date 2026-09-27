@@ -17,6 +17,7 @@ from .pathgraph import (
     PathGraph,
     TrackMatch,
     TrackPose,
+    normalize_route_id,
 )
 from .projection import MapPoint, ProjectionConfig, project_wgs84
 
@@ -34,5 +35,6 @@ __all__ = [
     "TrackPose",
     "base_link_from_dual_antenna",
     "base_link_from_single_antenna",
+    "normalize_route_id",
     "project_wgs84",
 ]
