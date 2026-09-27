@@ -230,17 +230,35 @@ class ReserveOdometryNode(Node):
         return _wrapped
 
     def _grade_at(self, s_m):
-        """Track grade at s, or flat ground once the estimate has drifted past the mapped route."""
+        """Track grade at s, or flat ground once the estimate has drifted past the mapped route.
+
+        A large fixed-lag catch-up gap re-simulates the model in up to ~max_gap_s/max_step_s (here,
+        up to ~3000) small steps in one tick, each of which asks for the grade here; once s has
+        drifted past the route, every one of those calls used to raise and catch OutOfGraphError.
+        Raise/except in a loop that size is measurably slow in Python (confirmed: a 5x-accelerated
+        stress run showed a single tick taking >2 s once the estimate ran off the mapped route,
+        matching the organizer audit's 2026-09-27 report of an 11 s tick under the same load) --
+        a plain bounds check first avoids ever taking the exception path for the common repeated
+        case, leaving it only for a genuinely unknown route_id.
+        """
         if not self.route_id:
             return 0.0
         try:
-            return self.geometry.grade_at(self.route_id, s_m)
-        except (KeyError, ValueError):
+            length = self.geometry.graph.length_m(self.route_id)
+        except KeyError:
             self.get_logger().warning(
-                f"Predicted position s={s_m:.1f} m is outside Pathgraph; using flat grade",
+                f"route_id {self.route_id!r} is not in the loaded Pathgraph; using flat grade",
                 throttle_duration_sec=5.0,
             )
             return 0.0
+        if not (0.0 <= s_m <= length):
+            self.get_logger().warning(
+                f"Predicted position s={s_m:.1f} m is outside Pathgraph (route length {length:.1f} m); "
+                "using flat grade",
+                throttle_duration_sec=5.0,
+            )
+            return 0.0
+        return self.geometry.grade_at(self.route_id, s_m)
 
     def _next_sequence(self):
         self.sequence += 1
