@@ -66,6 +66,7 @@ class ReserveOdometryNode(Node):
         # same estimator, so every access is serialized through one lock regardless of which thread
         # the executor happens to run it on.
         self._lock = threading.Lock()
+        self._warn_last_s: dict[str, float] = {}
         self._subscription_group = ReentrantCallbackGroup()
         self._timer_group = MutuallyExclusiveCallbackGroup()
         defaults = {
@@ -229,33 +230,47 @@ class ReserveOdometryNode(Node):
 
         return _wrapped
 
+    def _warn_throttled(self, key, build_message, period_s=5.0):
+        """Skip the ROS logger (and the sim-clock lookup behind it) entirely inside the throttle
+        window, instead of just suppressing the print: rclpy's own throttle_duration_sec still
+        formats the message and queries the clock on every call, and _grade_at can invoke this
+        thousands of times in one tick's fixed-lag catch-up loop once the estimate has drifted off
+        the mapped route (organizer audit 2026-09-27, issue #9, follow-up after 761a0af).
+        """
+        now = time.monotonic()
+        last = self._warn_last_s.get(key, 0.0)
+        if now - last < period_s:
+            return
+        self._warn_last_s[key] = now
+        self.get_logger().warning(build_message())
+
     def _grade_at(self, s_m):
         """Track grade at s, or flat ground once the estimate has drifted past the mapped route.
 
         A large fixed-lag catch-up gap re-simulates the model in up to ~max_gap_s/max_step_s (here,
-        up to ~3000) small steps in one tick, each of which asks for the grade here; once s has
-        drifted past the route, every one of those calls used to raise and catch OutOfGraphError.
-        Raise/except in a loop that size is measurably slow in Python (confirmed: a 5x-accelerated
-        stress run showed a single tick taking >2 s once the estimate ran off the mapped route,
-        matching the organizer audit's 2026-09-27 report of an 11 s tick under the same load) --
-        a plain bounds check first avoids ever taking the exception path for the common repeated
-        case, leaving it only for a genuinely unknown route_id.
+        up to ~3000) small steps in one tick, each of which asks for the grade here. 761a0af removed
+        the exception path for the common off-route case, but a 5x-accelerated repeat still stalled:
+        every one of those calls still hit self.get_logger().warning(...), and throttle_duration_sec
+        only suppresses the emitted line -- it still formats the message and queries the clock every
+        time. _warn_throttled skips that whole path, formatting included, until its window elapses.
         """
         if not self.route_id:
             return 0.0
         try:
             length = self.geometry.graph.length_m(self.route_id)
         except KeyError:
-            self.get_logger().warning(
-                f"route_id {self.route_id!r} is not in the loaded Pathgraph; using flat grade",
-                throttle_duration_sec=5.0,
+            self._warn_throttled(
+                "unknown_route",
+                lambda: f"route_id {self.route_id!r} is not in the loaded Pathgraph; using flat grade",
             )
             return 0.0
         if not (0.0 <= s_m <= length):
-            self.get_logger().warning(
-                f"Predicted position s={s_m:.1f} m is outside Pathgraph (route length {length:.1f} m); "
-                "using flat grade",
-                throttle_duration_sec=5.0,
+            self._warn_throttled(
+                "off_graph",
+                lambda: (
+                    f"Predicted position s={s_m:.1f} m is outside Pathgraph (route length "
+                    f"{length:.1f} m); using flat grade"
+                ),
             )
             return 0.0
         return self.geometry.grade_at(self.route_id, s_m)
