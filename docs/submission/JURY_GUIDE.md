@@ -39,9 +39,13 @@ docker run --rm -it --cpus 2 --memory 512m \
 ```bash
 source /opt/ros/humble/setup.bash
 cd ros2_ws
-colcon build --symlink-install
+colcon build
 source install/setup.bash
 ```
+
+Используйте обычный `colcon build`: пакет `odometry_python` устанавливает три
+runtime-библиотеки из их канонических каталогов и не рассчитан на режим
+`--symlink-install`.
 
 ## 3. Запуск на rosbag
 
