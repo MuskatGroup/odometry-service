@@ -87,19 +87,38 @@ def main():
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
     report = {"metrics": {}}
-    if with_v:
-        with_s = [r for r in reference if r["s"] is not None]
-        s0 = with_s[0]["s"] if with_s else 0.0
+    with_both = [r for r in reference if r["v"] is not None and r["s"] is not None]
+    if with_both:
+        # The estimator's s=0 is anchored at the bag's very first event so the full run (not
+        # just the GNSS-covered stretch) gets exercised for the stability/timing/RSS report
+        # above; the reference table's s=0 is a different physical point (its own first row
+        # with both v and s). These two anchors can be minutes apart in real time -- on this
+        # bag, ~270s -- during which the tram was already moving, so naively zeroing truth at
+        # its own first row while comparing against an estimator zeroed ~270s earlier compares
+        # two different physical origins, not drift: it adds a large constant offset (hundreds
+        # of metres here) that looks like error but isn't. Anchor both series to the SAME
+        # physical time/place instead: find the estimator's own s at the reference table's
+        # first usable timestamp, and re-zero the estimates around that before scoring, so the
+        # comparison reflects actual drift from a shared origin, not an artifact of the two
+        # differently-anchored s=0 conventions.
+        s0 = with_both[0]["s"]
+        anchor_stamp_ns = int(with_both[0]["stamp_ns"])
+        anchor_frame = min(frames, key=lambda f: abs(int(f["stamp_ns"]) - anchor_stamp_ns))
+        s_anchor = anchor_frame.get("s_m")
+        rezeroed_frames = [
+            dict(f, s_m=(f["s_m"] - s_anchor) if f.get("s_m") is not None and s_anchor is not None else f.get("s_m"))
+            for f in frames
+        ]
         truth = [
             {
                 "stamp_ns": str(r["stamp_ns"]),
                 "v_mps": r["v"],
-                "s_m": (r["s"] - s0) if r["s"] is not None else None,
+                "s_m": r["s"] - s0,
                 "route_id": r["route"],
             }
-            for r in with_v
+            for r in with_both
         ]
-        with tempfile_estimates(output, args.bag, frames, truth) as (estimates_path, truth_path):
+        with tempfile_estimates(output, args.bag, rezeroed_frames, truth) as (estimates_path, truth_path):
             report = evaluate(estimates_path, truth_path, output / f"{args.bag}-report.json", None)
 
     result = {
