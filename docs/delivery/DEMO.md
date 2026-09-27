@@ -16,7 +16,7 @@
 | Режим фильтра | `FUSED`, `DEGRADED`, `MODEL_ONLY`, `INVALID` |
 | Ручка и путь | позиция контроллера, пройденный путь и эталон пути |
 | Внесённые отказы | тип, колёса, дрейф пути и максимальная ошибка скорости за окно |
-| GNSS-коррекции | сейчас «недоступны»: ядро их пока не принимает |
+| GNSS-коррекции | политика, число принятых/отклонённых updates и максимальный скачок |
 | События качества | смены режима с причинами |
 
 Метрики, которых нет, показываются как «—», а не как ноль.
@@ -44,9 +44,12 @@ cd apps/web && npm ci && npm run dev
 Терминал 3 — загрузить запуски на реальной записи (`--api` отправляет результат на сайт):
 
 ```bash
-python -m odometry_lab.cli real-run --bag 30618_2050d396 --scenario none      --api http://127.0.0.1:8080
-python -m odometry_lab.cli real-run --bag 30618_2050d396 --scenario slip-1    --api http://127.0.0.1:8080
-python -m odometry_lab.cli real-run --bag 30618_2050d396 --scenario dropout-2 --api http://127.0.0.1:8080
+python -m odometry_lab.cli real-run --bag 30618_2050d396 --scenario none \
+  --gnss-mode never --output artifacts/real-none --api http://127.0.0.1:8080
+python -m odometry_lab.cli real-run --bag 30618_2050d396 --scenario slip-1 \
+  --gnss-mode never --output artifacts/real-slip --api http://127.0.0.1:8080
+python -m odometry_lab.cli real-run --bag 30618_2050d396 --scenario dropout-2 \
+  --gnss-mode intermittent-60 --output artifacts/real-dropout --api http://127.0.0.1:8080
 ```
 
 Затем открыть <http://127.0.0.1:5173>. Сценарии: `none`, `freeze-1`, `freeze-2`, `dropout-1`,
@@ -72,8 +75,9 @@ docker compose up --build console      # сайт и API на http://localhost:8
    скорость в 1,5 раза; в окне отказа видно расхождение колёс, оценка почти не сдвигается.
 3. **Оба колеса пропали.** Запуск `dropout-2`: режим переходит в `MODEL_ONLY`, интервал 95 %
    расширяется, ошибка растёт; после возвращения колёс оценка восстанавливается.
-4. **GNSS.** Эталонный трек виден на карте всегда, но алгоритм GNSS во время работы не
-   использует. Коррекции по GNSS появятся после подключения ядра (блок «GNSS-коррекции»).
+4. **GNSS.** Сравнить `never` с `initial` или `intermittent-60`. Эталонный трек используется
+   для метрик в обоих случаях; в разрешённом режиме отдельные position/velocity corrections
+   поступают в EKF и отражаются в блоке «GNSS-коррекции».
 5. **Итог.** Сравнить метрики трёх запусков и сопоставить с таблицей в
    [VALIDATION.md](VALIDATION.md).
 
@@ -84,3 +88,21 @@ docker compose up --build console      # сайт и API на http://localhost:8
   источником.
 - Ковариация EKF показывается, но не калибрована.
 - Сайт не проверялся на ширине меньше 800 пикселей.
+
+## 6. Обязательная ROS-демонстрация на rosbag
+
+Веб-стенд не заменяет сдачу ROS-ноды. Для демонстрации жюри:
+
+1. собрать Humble workspace по [`BUILD.md`](BUILD.md);
+2. запустить `reserve_odometry_node` и `ros2 bag play --clock` по [`RUN.md`](RUN.md);
+3. показать `ros2 topic hz /result/velocity` и `/result/position`;
+4. показать `a_mps2`, режим фильтра, wheel health и covariance из `/odometry/estimate`;
+5. повторить фрагмент без GNSS, затем с `initialization_only` или `intermittent`;
+6. сохранить результат в новый rosbag:
+
+```bash
+ros2 bag record /result/velocity /result/position /odometry/estimate /odometry/diagnostics
+```
+
+Демонстрация считается подтверждённой только после такого прогона на предоставленном bag,
+а не после синтетического `docker compose --profile demo`.

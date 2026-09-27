@@ -1,4 +1,8 @@
-# Аудит реализации разработчика 1
+# Исторический аудит ветки runtime-estimator
+
+> Архивный отчёт до интеграции geometry/reference. Актуальный статус сдачи находится в
+> [`README.md`](README.md). Перечисленные ниже внешние зависимости уже влиты, однако
+> целевой ROS/rosbag-прогон по-прежнему должен быть выполнен.
 
 Дата проверки: 26 сентября 2026.
 
@@ -30,18 +34,18 @@ diff check:  passed
 
 Skipped-тесты требуют ROS 2 Humble. На Windows-хосте `ros2` отсутствует.
 
-## Зависимости и ещё не подтверждённые критерии
+## Состояние после интеграции
 
-- `odometry_geometry` разрабатывается независимо; до его merge невозможно выполнить
-  реальный Pathgraph/MGRS/GNSS прогон.
-- Идентифицированные `configs/models/*.yaml` должны поступить от потока geometry/reference;
-  production runtime намеренно не использует скрытый hardcoded fallback.
-- Docker/colcon тест подготовлен, но не выполнен: Docker Desktop daemon не запущен.
+- `odometry_geometry`, Pathgraph и `configs/models/*.yaml` интегрированы в `main`.
+- Production runtime строго загружает профиль и не использует скрытый hardcoded fallback.
+- Docker/colcon тест подготовлен, но в последнем локальном аудите не выполнен: Docker
+  daemon не был запущен.
 - p99/CPU/RSS инструментированы, но соответствие лимитам подтверждается только прогоном в
   целевом Humble-контейнере на длинном bag.
-- Точность модели не заявляется до появления reference, параметров и validation report.
+- Offline validation report существует, но сквозные метрики production ROS-ноды ещё нужно
+  зафиксировать на предоставленном rosbag.
 
-После получения geometry/model artifacts обязательная проверка:
+Перед сдачей обязательна проверка:
 
 ```bash
 docker compose --profile test build ros-tests
@@ -49,5 +53,5 @@ docker compose --profile test run --rm ros-tests
 ros2 bag play dataset/data/30618_af7496f0 --clock
 ```
 
-Таким образом, кодовая зона ответственности разработчика 1 закрыта. Интеграционная и
-численная приёмка остаётся открытой по явно перечисленным внешним зависимостям.
+Код ветки интегрирован. Интеграционная и эксплуатационная приёмка остаётся открытой по
+списку в актуальном [`README.md`](README.md).
