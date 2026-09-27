@@ -43,7 +43,7 @@ production-запуск завершается ошибкой.
 | Файл | Политика | Назначение |
 |---|---|---|
 | `disabled.yaml` | `disabled` | основной режим сдачи: GNSS не подписывается и используется только offline как эталон |
-| `initialization_only.yaml` | `initialization_only` | GNSS задаёт начальные route/position, затем подписки удаляются |
+| `initialization_only.yaml` | `initialization_only` | GNSS задаёт начальные route/position; после первой привязки или 5 с вход закрыт |
 | `intermittent.yaml` | `intermittent` | разрешены gated GNSS-коррекции в середине маршрута |
 
 Профиль ROS не содержит локальные пути и идентификатор конкретного запуска. Их нужно
@@ -61,4 +61,3 @@ ros2 run odometry_node reserve_odometry_node --ros-args \
 
 Полный список runtime-параметров находится в [`RUN.md`](RUN.md). Любое изменение порогов
 для итогового прогона следует сохранять вместе с отчётом, иначе результат невоспроизводим.
-

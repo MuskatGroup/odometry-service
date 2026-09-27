@@ -71,13 +71,14 @@ class ReserveOdometryNode(Node):
             "vehicle_id": "default",
             "route_id": "",
             "s0": 0.0,
-            "initial_v_mps": 0.0,
+            "initial_v_mps": -1.0,  # -1: initialize from the first usable wheel group
             "gnss_policy": "disabled",
+            "gnss_initialization_window_s": 5.0,
             "pathgraph_directory": "",
             "model_config": "",
             "allow_unidentified_model": False,
             "publish_rate_hz": 50.0,
-            "processing_delay_ms": 120.0,
+            "processing_delay_ms": 300.0,
             "max_model_only_s": 10.0,
             "gnss_sync_tolerance_ms": 200.0,
             "gnss_cross_track_gate_m": 8.0,
@@ -96,8 +97,13 @@ class ReserveOdometryNode(Node):
         self.gnss_policy = self.get_parameter("gnss_policy").value
         if self.gnss_policy not in GNSS_POLICIES:
             raise ValueError(f"gnss_policy must be one of {sorted(GNSS_POLICIES)}")
-        if self.gnss_policy == "disabled" and not self.route_id:
-            raise ValueError("route_id is required when gnss_policy=disabled")
+        initial_v = float(self.get_parameter("initial_v_mps").value)
+        if not math.isfinite(initial_v) or (initial_v < 0 and initial_v != -1.0):
+            raise ValueError("initial_v_mps must be non-negative or -1 for wheel initialization")
+        self.gnss_window_s = float(self.get_parameter("gnss_initialization_window_s").value)
+        if not math.isfinite(self.gnss_window_s) or self.gnss_window_s <= 0:
+            raise ValueError("gnss_initialization_window_s must be finite and positive")
+        self.input_origin_stamp = None
         profile = self.get_parameter("model_config").value
         allow_unidentified = bool(self.get_parameter("allow_unidentified_model").value)
         if model_config is None:
@@ -112,20 +118,22 @@ class ReserveOdometryNode(Node):
         model_config = replace(
             model_config,
             max_model_only_s=float(self.get_parameter("max_model_only_s").value),
+            bootstrap_wheel_speed=initial_v == -1.0,
         )
         self.geometry = geometry
         if self.geometry is None:
             pathgraph = self.get_parameter("pathgraph_directory").value
-            if not pathgraph:
-                raise ValueError("pathgraph_directory is required")
-            self.geometry = GeometryAdapter(pathgraph)
+            if pathgraph:
+                self.geometry = GeometryAdapter(pathgraph)
+            elif self.route_id or self.gnss_policy != "disabled":
+                raise ValueError("pathgraph_directory is required for map positioning or GNSS")
         self.estimator = AdaptiveOdometryEstimator(
             model_config,
             # Plain lambda, not a bound method: copy.deepcopy treats function objects as atomic and
             # never recurses into their closure, so this survives advance_fixed_lag's preview copy.
             # A bound method is deep-copied through __self__, dragging in the whole Node (locks and
             # all) and raising "cannot pickle '_thread.lock' object".
-            grade_provider=lambda s: self._grade_at(s),
+            route_grade_provider=lambda route_id, s: self._grade_at(route_id, s),
         )
         self.model_config = model_config
         self.sequence = 0
@@ -137,12 +145,15 @@ class ReserveOdometryNode(Node):
         self.cpu_cores = 0.0
         self.pending_fixes = {}
         self.gnss_subscriptions = []
+        self.gnss_closed = False
         self.gnss_initialized = False
         self.prefilter_rejected_position = 0
         self.prefilter_rejected_velocity = 0
-        self.initial_position_accepts = 0
         self.gnss_reasons = set()
         self.latency_ms = deque(maxlen=4096)
+        self.pending_input_timing = deque(maxlen=4096)
+        self.callback_received_ns = None
+        self.latest_input_to_publication_ms = None
         self.input_lateness_ms = deque(maxlen=4096)
         self.wheel_lateness_ms = deque(maxlen=4096)
         self.late_input_count = 0
@@ -198,8 +209,10 @@ class ReserveOdometryNode(Node):
         """
 
         def _wrapped(*args, **kwargs):
+            received_ns = time.perf_counter_ns()
             try:
                 with self._lock:
+                    self.callback_received_ns = received_ns
                     return callback(*args, **kwargs)
             except Exception:  # noqa: BLE001 - last-resort guard, logged in full below
                 import traceback
@@ -214,12 +227,12 @@ class ReserveOdometryNode(Node):
 
         return _wrapped
 
-    def _grade_at(self, s_m):
+    def _grade_at(self, route_id, s_m):
         """Track grade at s, or flat ground once the estimate has drifted past the mapped route."""
-        if not self.route_id:
+        if not route_id:
             return 0.0
         try:
-            return self.geometry.grade_at(self.route_id, s_m)
+            return self.geometry.grade_at(route_id, s_m)
         except (KeyError, ValueError):
             self.get_logger().warning(
                 f"Predicted position s={s_m:.1f} m is outside Pathgraph; using flat grade",
@@ -233,11 +246,12 @@ class ReserveOdometryNode(Node):
 
     def _ensure_initialized(self, stamp):
         if self.estimator.t is None:
+            self.input_origin_stamp = stamp
             self.estimator.initialize(
                 InitialState(
                     stamp,
                     self.s0,
-                    float(self.get_parameter("initial_v_mps").value),
+                    max(0.0, float(self.get_parameter("initial_v_mps").value)),
                 ),
                 self.model_config,
             )
@@ -261,24 +275,45 @@ class ReserveOdometryNode(Node):
     def _control(self, msg):
         stamp = ns(msg.header.stamp)
         self._record_input_timing(stamp)
-        self._ensure_initialized(stamp)
         try:
             value = controller_position_to_u(msg.position)
         except ValueError as exc:
             self.get_logger().error(str(exc), throttle_duration_sec=1.0)
             return
+        self._ensure_initialized(stamp)
+        queued = len(self.estimator.queue)
         self.estimator.ingest_control(ControlSample(stamp, self._next_sequence(), value))
+        self._track_queued_input(stamp, queued)
 
     def _wheel(self, msg, wheel_id):
         stamp = ns(msg.header.stamp)
         self._record_input_timing(stamp, wheel=True)
-        self._ensure_initialized(stamp)
         try:
             value = wheel_kmh_to_mps(msg.velocity)
         except ValueError as exc:
             self.get_logger().error(str(exc), throttle_duration_sec=1.0)
             return
+        self._ensure_initialized(stamp)
+        queued = len(self.estimator.queue)
         self.estimator.ingest_wheel(WheelSample(stamp, self._next_sequence(), wheel_id, value))
+        self._track_queued_input(stamp, queued)
+
+    def _track_queued_input(self, stamp, previous_queue_size):
+        if len(self.estimator.queue) > previous_queue_size:
+            self.pending_input_timing.append((
+                stamp, self.callback_received_ns or time.perf_counter_ns(),
+            ))
+
+    def _gnss_allowed(self, stamp):
+        if self.gnss_policy == "disabled" or self.gnss_closed:
+            return False
+        if self.gnss_policy == "intermittent":
+            return True
+        origin = self.input_origin_stamp
+        if self.gnss_initialized or (origin is not None and stamp > origin + self.gnss_window_s * 1e9):
+            self.gnss_reasons.add("GNSS_INITIALIZATION_CLOSED")
+            return False
+        return True
 
     def _create_gnss_subscriptions(self):
         for receiver in ANTENNAS:
@@ -305,6 +340,8 @@ class ReserveOdometryNode(Node):
             )
 
     def _fix(self, msg, receiver):
+        if not self._gnss_allowed(ns(msg.header.stamp)):
+            return
         self._record_input_timing(ns(msg.header.stamp))
         values = (float(msg.latitude), float(msg.longitude), float(msg.altitude))
         if msg.status.status < 0 or not all(math.isfinite(value) for value in values):
@@ -348,6 +385,8 @@ class ReserveOdometryNode(Node):
                 self._consume_single(receiver)
 
     def _apply_observation(self, observation, stamp, variance, source):
+        if not self._gnss_allowed(stamp):
+            return
         if observation is None:
             self.prefilter_rejected_position += 1
             self.gnss_reasons.add("GNSS_OUT_OF_GRAPH")
@@ -365,41 +404,34 @@ class ReserveOdometryNode(Node):
             self.gnss_reasons.add("GNSS_BASELINE_REJECTED")
             return
         self._ensure_initialized(stamp)
-        if self.route_id is None:
-            current_v = self.estimator.x[1]
-            self.route_id = observation.route_id
-            self.estimator.initialize(InitialState(stamp, observation.s_m, current_v), self.model_config)
-            self.estimator.route_id = self.route_id
-            self.gnss_initialized = True
-            self.initial_position_accepts += 1
-        elif observation.route_id != self.route_id:
+        if self.route_id is not None and observation.route_id != self.route_id:
             self.prefilter_rejected_position += 1
             self.gnss_reasons.add("GNSS_ROUTE_MISMATCH")
             return
-        else:
-            self.estimator.ingest_position_correction(
-                AlongTrackPositionCorrection(
-                    stamp,
-                    self._next_sequence(),
-                    self.route_id,
-                    observation.s_m,
-                    max(float(variance), 1e-6),
-                    source,
-                )
+        self.estimator.ingest_position_correction(
+            AlongTrackPositionCorrection(
+                stamp, self._next_sequence(), observation.route_id, observation.s_m,
+                max(float(variance), 1e-6), source, initialize=self.route_id is None,
             )
+        )
         self.last_gnss_stamp = stamp
 
     def _disable_gnss(self):
-        for subscription in self.gnss_subscriptions:
-            self.destroy_subscription(subscription)
-        self.gnss_subscriptions.clear()
+        # Humble's multithreaded executor may already have a subscription in its wait set.
+        # Destroying it from the timer callback races _take_subscription (outside our guard)
+        # and crashes with InvalidHandle. Keep handles alive until node teardown, but close
+        # the input gate permanently so queued/subsequent callbacks cannot apply corrections.
+        self.gnss_closed = True
         self.pending_fixes.clear()
+        self.gnss_reasons.add("GNSS_INITIALIZATION_CLOSED")
 
     def _velocity_correction(self, msg, receiver):
         del receiver
         stamp = ns(msg.header.stamp)
+        if not self._gnss_allowed(stamp):
+            return
         self._record_input_timing(stamp)
-        if not self.route_id or self.estimator.t is None:
+        if self.estimator.route_id is None or self.estimator.t is None:
             self.prefilter_rejected_velocity += 1
             return
         try:
@@ -436,6 +468,12 @@ class ReserveOdometryNode(Node):
         if stamp < self.estimator.t:
             return
         self._flush_old_fixes(stamp)
+        if (
+            self.gnss_policy == "initialization_only" and not self.gnss_closed
+            and stamp > self.input_origin_stamp + self.gnss_window_s * 1e9
+        ):
+            self._disable_gnss()
+            self.gnss_reasons.add("GNSS_INITIALIZATION_CLOSED")
         if stamp == self.last_publish_stamp:
             return
         began = time.perf_counter()
@@ -446,14 +484,16 @@ class ReserveOdometryNode(Node):
         self._publish(result, stamp, compute_ms)
 
     def _publish(self, result, stamp, compute_ms):
-        result.accepted_gnss_position_count += self.initial_position_accepts
+        if result.route_id:
+            self.route_id = result.route_id
         result.rejected_gnss_position_count += self.prefilter_rejected_position
         result.rejected_gnss_velocity_count += self.prefilter_rejected_velocity
         result.reason_codes.extend(sorted(self.gnss_reasons))
         self.gnss_reasons.clear()
-        if self.gnss_policy == "initialization_only" and self.gnss_subscriptions and (
+        if self.gnss_policy == "initialization_only" and not self.gnss_closed and (
             self.gnss_initialized or result.accepted_gnss_position_count > 0
         ):
+            self.gnss_initialized = True
             self._disable_gnss()
         wall_now, cpu_now = time.perf_counter(), time.process_time()
         wall_delta = wall_now - self.last_perf_wall
@@ -466,9 +506,8 @@ class ReserveOdometryNode(Node):
                 map_pose = self.geometry.body_pose_at(self.route_id, result.s_m)
             except (KeyError, ValueError):
                 result.reason_codes.append("OUT_OF_GRAPH")
-                result.valid = False
         elif self.route_id is None:
-            result.reason_codes.append("POSITION_INITIALIZING")
+            result.reason_codes.append("RELATIVE_POSITION_ONLY")
         gnss_age = None if self.last_gnss_stamp is None else (stamp - self.last_gnss_stamp) / 1e9
         estimate = estimate_message(
             result,
@@ -485,10 +524,20 @@ class ReserveOdometryNode(Node):
             velocity.header.frame_id = "base_link"
             velocity.velocity = result.v_mps
             self.velocity_publisher.publish(velocity)
-        # Position only needs a known route and a finite s (map_pose implies both); it must not be
-        # withheld just because the *velocity* side is degraded (wheel staleness, model-only, ...).
-        if map_pose is not None and result.covariance_4x4 is not None:
+        # Keep both outputs continuous during degradation; the frame and diagnostics distinguish
+        # mapped XY from one-dimensional odometry. Validity is carried by /odometry/estimate.
+        if result.s_m is not None and result.covariance_4x4 is not None:
             self.position_publisher.publish(self._odometry(result, map_pose, stamp))
+        published_ns = time.perf_counter_ns()
+        pending, samples = deque(maxlen=4096), []
+        for input_stamp, received_ns in self.pending_input_timing:
+            if input_stamp <= stamp:
+                samples.append(max(0.0, (published_ns - received_ns) / 1e6))
+            else:
+                pending.append((input_stamp, received_ns))
+        self.pending_input_timing = pending
+        self.latency_ms.extend(samples)
+        self.latest_input_to_publication_ms = max(samples, default=None)
         self._publish_diagnostics(result, compute_ms, stamp, map_pose is not None)
         self.last_publish_stamp = stamp
 
@@ -497,6 +546,18 @@ class ReserveOdometryNode(Node):
         set_stamp(message.header, stamp)
         message.header.frame_id = "map"
         message.child_frame_id = "base_link"
+        if pose is None:
+            # One-dimensional track coordinates, not a fabricated XY trajectory. Without a
+            # route the origin is the configured start; beyond a route use absolute along-track s.
+            message.header.frame_id = f"track/{self.route_id}" if self.route_id else "odom"
+            message.pose.pose.position.x = result.s_m if self.route_id else result.s_m - self.s0
+            message.pose.pose.orientation.w = 1.0
+            message.pose.covariance[0] = max(result.covariance_4x4[0], 1e-12)
+            message.twist.twist.linear.x = result.v_mps
+            message.twist.covariance[0] = max(result.covariance_4x4[5], 1e-12)
+            for index in (7, 14, 21, 28, 35):
+                message.pose.covariance[index] = message.twist.covariance[index] = 1e6
+            return message
         message.pose.pose.position.x = pose.x_m
         message.pose.pose.position.y = pose.y_m
         message.pose.pose.position.z = pose.z_m
@@ -525,11 +586,10 @@ class ReserveOdometryNode(Node):
         status.name = "reserve_odometry"
         status.hardware_id = self.vehicle_id
         status.level = DiagnosticStatus.OK if result.valid else DiagnosticStatus.ERROR
-        if result.mode != "FUSED" and result.valid:
+        if (result.mode != "FUSED" or not has_map_pose) and result.valid:
             status.level = DiagnosticStatus.WARN
         status.message = result.mode
-        input_to_publication_ms = max(0.0, (self.get_clock().now().nanoseconds - stamp) / 1e6)
-        self.latency_ms.append(input_to_publication_ms)
+        input_to_publication_ms = self.latest_input_to_publication_ms
         rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
         latency_p95 = percentile(self.latency_ms, 0.95)
         latency_p99 = percentile(self.latency_ms, 0.99)
@@ -557,11 +617,12 @@ class ReserveOdometryNode(Node):
             KeyValue(key="late_input_count", value=str(self.late_input_count)),
             KeyValue(key="too_late_input_count", value=str(self.too_late_input_count)),
             KeyValue(key="crash_count", value=str(self.crash_count)),
-            KeyValue(key="input_to_publication_ms", value=f"{input_to_publication_ms:.6f}"),
+            KeyValue(key="latency_definition", value="wheel/control callback entry to result publication; steady clock"),
+            KeyValue(key="input_to_publication_ms", value=str(input_to_publication_ms)),
             KeyValue(key="latency_samples", value=str(len(self.latency_ms))),
-            KeyValue(key="latency_p95_ms", value=f"{latency_p95:.6f}"),
-            KeyValue(key="latency_p99_ms", value=f"{latency_p99:.6f}"),
-            KeyValue(key="latency_max_ms", value=f"{max(self.latency_ms):.6f}"),
+            KeyValue(key="latency_p95_ms", value=str(latency_p95)),
+            KeyValue(key="latency_p99_ms", value=str(latency_p99)),
+            KeyValue(key="latency_max_ms", value=str(max(self.latency_ms, default=None))),
             KeyValue(key="cpu_cores", value=f"{self.cpu_cores:.6f}"),
             KeyValue(key="rss_mb", value=f"{rss_mb:.3f}"),
         ]

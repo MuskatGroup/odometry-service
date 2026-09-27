@@ -19,8 +19,8 @@ from .realdata import (
     correction_events,
     correction_jump_m,
     events_for_run,
+    run_real_events,
 )
-from .runner import run_events
 from .storage import write_json, write_rows
 
 SCHEMA_VERSION = "0.3"
@@ -90,9 +90,7 @@ def export_run(
         raise ValueError("GNSS correction modes require the adaptive-ekf estimator")
     corrections = correction_events(case, gnss_mode)
     events = events_for_run(case, scenario, start, end, gnss_mode)
-    frames, counts = run_events(
-        events, initial=case.initial, config=model_config, estimator_name=estimator_name, hz=50
-    )
+    frames, counts = run_real_events(case, events, model_config, estimator_name)
     for frame in frames:
         frame.update(run_id=run_id, schema_version=SCHEMA_VERSION)
     faults = (
@@ -120,6 +118,8 @@ def export_run(
     report["reference"] = {
         "source": "GNSS-derived (two receivers, dual-antenna base_link, Pathgraph)",
         "coverage": case.reference_coverage,
+        "initial_state_source": "GNSS at window start (s0, v0); not a cold-start evaluation",
+        "replay_timing": "header-time offline replay; DDS latency is measured separately",
     }
     report["map"] = map_block(case, frames)
     accepted = [

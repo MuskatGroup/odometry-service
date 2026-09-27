@@ -254,11 +254,17 @@ def main():
         if args.api:
             import_report(args.output, args.api)
     elif args.command == "calibrate-noise":
+        from odometry_io import load_model_config
+
         split = load_split(Path(args.derived) / "split.json")
-        bags = dedupe(split["identification"], split["duplicates"])[: args.limit]
-        result = calibrate(bags, args.data, Path(args.derived) / "reference")
-        print("best:", result["best"], "hand-picked:", round(result["baseline_objective_rmse_mps"], 4))
         for profile in args.profile:
+            base, metadata, _ = load_model_config(profile)
+            vehicle = metadata["vehicle_id"]
+            candidates = [bag for bag in split["identification"]
+                          if vehicle == "default" or bag.startswith(vehicle + "_")]
+            bags = dedupe(candidates, split["duplicates"])[: args.limit]
+            result = calibrate(bags, args.data, Path(args.derived) / "reference", base=base)
+            print(profile, "best:", result["best"], "baseline:", round(result["baseline_objective_rmse_mps"], 4))
             apply_to_profile(profile, result)
     print("Completed:", args.command)
 

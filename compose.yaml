@@ -65,8 +65,24 @@ services:
     build:
       context: .
       dockerfile: infra/Dockerfile.ros
-    command: ["python3", "-m", "pytest", "-q", "tests/integration/test_ros.py"]
+    command: ["python3", "-m", "pytest", "-q", "tests/integration"]
     environment: {ROS_DOMAIN_ID: "73", RUN_ROS_TESTS: "1"}
+
+  reserve:
+    profiles: ["reserve"]
+    image: odometry-ros:validation
+    build:
+      context: .
+      dockerfile: infra/Dockerfile.ros
+    cpus: 2
+    mem_limit: 512m
+    environment: {ROS_DOMAIN_ID: "75"}
+    volumes:
+      - ./dataset/data:/bags:ro
+      - ./dataset/derived:/reference:ro
+      - ./tests/check-code/bags:/check-bags:ro
+      - ./artifacts:/artifacts
+      - ./tools:/tools:ro
 
 volumes:
   console-data:

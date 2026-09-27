@@ -2276,12 +2276,14 @@ version = "0.1.0"
 source = { editable = "python/odometry_lab" }
 dependencies = [
     { name = "odometry-core" },
+    { name = "odometry-geometry" },
     { name = "odometry-io" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "odometry-core", editable = "python/odometry_core" },
+    { name = "odometry-geometry", editable = "python/odometry_geometry" },
     { name = "odometry-io", editable = "python/odometry_io" },
 ]
 
@@ -2291,6 +2293,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "odometry-core" },
+    { name = "odometry-geometry" },
     { name = "odometry-io" },
     { name = "odometry-lab" },
 ]
@@ -2317,6 +2320,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "odometry-core", editable = "python/odometry_core" },
+    { name = "odometry-geometry", editable = "python/odometry_geometry" },
     { name = "odometry-io", editable = "python/odometry_io" },
     { name = "odometry-lab", editable = "python/odometry_lab" },
 ]

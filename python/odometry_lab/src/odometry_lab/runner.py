@@ -61,24 +61,27 @@ def estimator_counts(estimator):
     return counts
 
 
-def create_estimator(name="wheel-hold", model_config=None):
+def create_estimator(name="wheel-hold", model_config=None, grade_provider=None):
     if name == "wheel-hold":
         if model_config is not None:
             raise ValueError("model_config is only valid for adaptive-ekf")
         return OdometryEstimator(), EstimatorConfig()
     if name == "adaptive-ekf":
         config = model_config or ModelConfig()
-        return AdaptiveOdometryEstimator(config), config
+        return AdaptiveOdometryEstimator(config, grade_provider=grade_provider), config
     raise ValueError(f"Unknown estimator: {name}")
 
 
-def run_events(events, initial=None, config=None, hz=50, tail_s=0.0, estimator_name="wheel-hold"):
+def run_events(
+    events, initial=None, config=None, hz=50, tail_s=0.0, estimator_name="wheel-hold",
+    grade_provider=None,
+):
     if not events:
         raise ValueError("No usable input events")
     if hz <= 0 or tail_s < 0:
         raise ValueError("Invalid run frequency/tail")
     initial = initial or InitialState(events[0].stamp_ns)
-    estimator, default_config = create_estimator(estimator_name, config)
+    estimator, default_config = create_estimator(estimator_name, config, grade_provider)
     config = config or default_config
     estimator.initialize(initial, config)
     period = round(1e9 / hz)

@@ -13,6 +13,7 @@ from pathlib import Path
 
 import yaml
 from odometry_core import ModelConfig
+from odometry_io.model_config import load_model_config, model_config_from_document
 
 from . import benchmark
 from .realdata import build_case, run_case
@@ -35,16 +36,12 @@ HEALTH_FIELDS = {
 
 
 def config_from_profile(profile: dict) -> ModelConfig:
-    """ModelConfig from a model YAML (noise + wheel health + actuator lag and drag)."""
-    values = {field: profile["noise"][key] for key, field in NOISE_FIELDS.items()}
-    values.update({field: profile["wheel_health"][key] for key, field in HEALTH_FIELDS.items()})
-    longitudinal = profile["longitudinal"]
-    values.update(tau_s=longitudinal["tau_s"], c1=longitudinal["c1_inv_s"], c2=longitudinal["c2_inv_m"])
-    return ModelConfig(**values)
+    """Load the complete runtime model, including drive maps and disturbance adaptation."""
+    return model_config_from_document(profile)
 
 
 def load_profile_config(path: str | Path) -> ModelConfig:
-    return config_from_profile(yaml.safe_load(Path(path).read_text(encoding="utf-8")))
+    return load_model_config(path)[0]
 
 
 def score(config: ModelConfig, cases: list) -> float:

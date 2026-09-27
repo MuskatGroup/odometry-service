@@ -39,6 +39,7 @@ class AlongTrackPositionCorrection:
     s_m: float
     variance_m2: float
     source: str
+    initialize: bool = False  # first absolute anchor, not a gated correction of an existing anchor
 
 
 class WheelHealthState(str, Enum):

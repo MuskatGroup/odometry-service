@@ -14,6 +14,44 @@ from odometry_lab.evaluate import evaluate
 from odometry_lab.storage import write_rows
 
 
+def test_moving_start_bootstraps_once_without_disabling_subsequent_gates():
+    estimator = AdaptiveOdometryEstimator(ModelConfig(bootstrap_wheel_speed=True))
+    estimator.initialize(InitialState(0))
+    estimator.ingest_control(ControlSample(0, 0, 0.6))
+    estimator.ingest_wheel(WheelSample(20_000_000, 1, "front", 12.0))
+    first = estimator.advance_to(20_000_000)
+    assert first.v_mps == pytest.approx(12.0)
+    assert first.accepted_wheel_count == 1
+    estimator.ingest_wheel(WheelSample(40_000_000, 2, "front", 25.0))
+    second = estimator.advance_to(40_000_000)
+    assert second.v_mps < 13.0
+    assert second.rejected_wheel_count == 1
+
+
+def test_first_map_anchor_preserves_motion_history_and_future_events():
+    estimator = AdaptiveOdometryEstimator(ModelConfig(c1=0.0))
+    estimator.initialize(InitialState(0, 0.0, 10.0))
+    estimator.ingest_control(ControlSample(0, 0, 0.2))
+    estimator.ingest_wheel(WheelSample(100_000_000, 1, "front", 10.0))
+    estimator.ingest_position_correction(AlongTrackPositionCorrection(
+        200_000_000, 2, "route-a", 3000.0, 4.0, "gnss", initialize=True,
+    ))
+    estimator.ingest_wheel(WheelSample(300_000_000, 3, "front", 10.0))
+    anchored = estimator.advance_to(200_000_000)
+    assert anchored.s_m == pytest.approx(3000.0)
+    assert anchored.v_mps == pytest.approx(10.0, abs=0.1)
+    assert estimator.control == 0.2 and len(estimator.queue) == 1
+    later = estimator.advance_to(300_000_000)
+    assert later.accepted_wheel_count == 2
+    assert later.accepted_gnss_position_count == 1
+    assert 3000.9 < later.s_m < 3001.1
+    # The same flag cannot repeatedly bypass the position innovation gate.
+    estimator.ingest_position_correction(AlongTrackPositionCorrection(
+        400_000_000, 4, "route-a", 9000.0, 4.0, "gnss", initialize=True,
+    ))
+    assert estimator.advance_to(400_000_000).rejected_gnss_position_count == 1
+
+
 def test_adaptive_ekf_publishes_covariance_and_integrates_position():
     estimator = AdaptiveOdometryEstimator(ModelConfig(control_timeout_s=2.0))
     estimator.initialize(InitialState(0, 0, 10), ModelConfig(control_timeout_s=2.0))
@@ -69,6 +107,79 @@ def test_frozen_channel_is_removed_while_acceleration_is_expected():
     assert "WHEEL_FROZEN" in result.reason_codes
     assert "frozen" not in result.wheel_speeds_mps
     assert result.wheel_health["frozen"] == "frozen"
+
+
+def test_common_freeze_remains_rejected_after_controller_returns_to_neutral():
+    config = ModelConfig(c1=0.0, freeze_s=0.2, reacquire_s=1.0, max_model_only_s=1.0)
+    estimator = AdaptiveOdometryEstimator(config)
+    estimator.initialize(InitialState(0, 0, 5))
+    for index in range(31):
+        stamp = index * 100_000_000
+        estimator.ingest_control(ControlSample(stamp, index, 0.8 if index < 6 else 0.0))
+        for channel in ("front", "rear"):
+            estimator.ingest_wheel(WheelSample(stamp, index, channel, 5.0))
+        result = estimator.advance_to(stamp)
+        if index == 5:
+            accepted_before_coast = result.accepted_wheel_count
+    assert set(result.wheel_health.values()) == {"frozen"}
+    assert result.accepted_wheel_count == accepted_before_coast
+    assert not result.valid
+    assert "MODEL_ONLY_HORIZON" in result.reason_codes
+    assert result.wheel_speeds_mps == {}
+
+    # Fresh, physically consistent changes may recover, subject to normal hysteresis.
+    for index in range(31, 41):
+        stamp = index * 100_000_000
+        for channel in ("front", "rear"):
+            estimator.ingest_wheel(WheelSample(stamp, index, channel, estimator.x[1] + 0.001))
+        result = estimator.advance_to(stamp)
+    assert result.valid
+    assert set(result.wheel_health.values()) == {"normal"}
+    assert not estimator.frozen_ids
+
+
+def test_stationary_braked_wheels_are_not_frozen_by_negative_model_acceleration():
+    config = ModelConfig(
+        freeze_s=0.2,
+        braking_map=DriveMap((-1.0,), (0.0,), ((-0.8,),)),
+    )
+    estimator = AdaptiveOdometryEstimator(config)
+    estimator.initialize(InitialState(0))
+    for index in range(21):
+        stamp = index * 100_000_000
+        estimator.ingest_control(ControlSample(stamp, index, -1.0))
+        for channel in ("front", "rear"):
+            estimator.ingest_wheel(WheelSample(stamp, index, channel, 0.0))
+        result = estimator.advance_to(stamp)
+    assert result.valid
+    assert result.v_mps == 0.0
+    assert set(result.wheel_health.values()) == {"normal"}
+    assert "WHEEL_FROZEN" not in result.reason_codes
+
+
+def test_zero_speed_latch_can_recover_only_when_model_also_reaches_standstill():
+    config = ModelConfig(
+        c1=0.0, freeze_s=0.2, max_model_only_s=1.0,
+        braking_map=DriveMap((-1.0,), (0.0,), ((-0.8,),)),
+    )
+    estimator = AdaptiveOdometryEstimator(config)
+    estimator.initialize(InitialState(0))
+    detected = False
+    for index in range(41):
+        stamp = index * 100_000_000
+        estimator.ingest_control(ControlSample(stamp, index, 1.0 if index < 10 else -1.0))
+        for channel in ("front", "rear"):
+            estimator.ingest_wheel(WheelSample(stamp, index, channel, 0.0))
+        result = estimator.advance_to(stamp)
+        detected |= "WHEEL_FROZEN" in result.reason_codes
+        if index == 10:
+            assert result.v_mps > 0.0
+            assert set(result.wheel_health.values()) == {"frozen"}
+    assert detected
+    assert result.valid and result.mode == "FUSED"
+    assert result.v_mps == 0.0
+    assert set(result.wheel_health.values()) == {"normal"}
+    assert not estimator.frozen_ids
 
 
 def test_scalar_velocity_and_position_corrections_are_ordered_and_counted():

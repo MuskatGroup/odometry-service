@@ -2,7 +2,8 @@ reserve_odometry:
   ros__parameters:
     gnss_policy: initialization_only
     publish_rate_hz: 50.0
-    processing_delay_ms: 120.0
+    processing_delay_ms: 300.0
+    gnss_initialization_window_s: 5.0
     max_model_only_s: 10.0
     gnss_sync_tolerance_ms: 200.0
     gnss_cross_track_gate_m: 8.0

@@ -4,6 +4,7 @@
   <description>Runtime, replay and telemetry bridge</description>
   <maintainer email="team@example.invalid">Odometry team</maintainer><license>MIT</license>
   <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>odometry_python</exec_depend>
   <exec_depend>rclpy</exec_depend><exec_depend>odometry_msgs</exec_depend>
   <exec_depend>nav_msgs</exec_depend><exec_depend>diagnostic_msgs</exec_depend>
   <exec_depend>tram_vehicle_msgs</exec_depend><exec_depend>sensor_msgs</exec_depend>

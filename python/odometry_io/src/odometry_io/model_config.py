@@ -104,6 +104,11 @@ def resolve_model_profile(path, vehicle_id):
 def load_model_config(path, vehicle_id="default"):
     profile_path = resolve_model_profile(path, vehicle_id)
     document = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
+    return model_config_from_document(document), document, profile_path
+
+
+def model_config_from_document(document):
+    """The single profile-to-model conversion used by runtime and offline evaluation."""
     if not isinstance(document, dict):
         raise ModelProfileError("Model profile must be an object")
     unknown = set(document) - TOP_LEVEL
@@ -161,6 +166,6 @@ def load_model_config(path, vehicle_id="default"):
         "adapt_disturbance": True,
     }
     try:
-        return ModelConfig(**values), document, profile_path
+        return ModelConfig(**values)
     except (TypeError, ValueError) as exc:
         raise ModelProfileError(str(exc)) from exc

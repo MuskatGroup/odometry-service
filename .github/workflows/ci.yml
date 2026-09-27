@@ -8,7 +8,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --locked --python 3.10
       - run: uv run pytest -q
-      - run: uv run ruff check python tests ros2_ws/src/odometry_node
+      - run: uv run ruff check python tests ros2_ws/src/odometry_node ros2_ws/src/odometry_python tools
   console:
     runs-on: ubuntu-22.04
     steps:

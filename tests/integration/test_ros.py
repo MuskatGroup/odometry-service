@@ -112,7 +112,6 @@ def test_reserve_node_uses_organizer_contracts_and_si_outputs():
     from rclpy.executors import SingleThreadedExecutor
     from rclpy.node import Node
     from rclpy.parameter import Parameter
-
     from tram_vehicle_msgs.msg import DriverControllerCommand, VelocitySensor
 
     class Pose:
@@ -174,6 +173,13 @@ def test_reserve_node_uses_organizer_contracts_and_si_outputs():
 
         # Organizer bags deliver wheel headers tens of milliseconds behind /clock. The
         # fixed-lag commit must accept these samples while publishing a current-time preview.
+        # Wait until a delayed timestamp can actually be *after* the first sample. Otherwise
+        # a fast first publication creates a pre-initialization event, correctly rejected.
+        first_stamp = now.sec * 1_000_000_000 + now.nanosec
+        deadline = time.monotonic() + 2
+        while source.get_clock().now().nanoseconds < first_stamp + 160_000_000:
+            executor.spin_once(timeout_sec=0.01)
+            assert time.monotonic() < deadline
         delayed = source.get_clock().now().nanoseconds - 80_000_000
         wheel.header.stamp.sec, wheel.header.stamp.nanosec = divmod(delayed, 1_000_000_000)
         front.publish(wheel)
