@@ -31,7 +31,12 @@ def advance_fixed_lag(estimator, now_ns: int, reorder_window_ns: int):
     committed = estimator.advance_to(commit_ns)
     # ``seen`` can contain thousands of deduplication keys. Prediction never enqueues new
     # events, so sharing this read-only cache avoids an O(history) copy on every 50 Hz tick.
-    preview = copy.deepcopy(estimator, {id(estimator.seen): estimator.seen})
+    # ``grade_provider`` is shared read-only too: besides being wasted work to copy every tick,
+    # a caller-supplied bound method (unlike a lambda, which copy.deepcopy never recurses into)
+    # would drag the method's whole owning object into the copy — e.g. a ROS node, whose
+    # publishers/locks cannot be pickled at all, turning a routine tick into a crash.
+    shared = {id(estimator.seen): estimator.seen, id(estimator.grade_provider): estimator.grade_provider}
+    preview = copy.deepcopy(estimator, shared)
     result = preview.advance_to(now_ns)
     for reason in committed.reason_codes:
         if reason in TRANSPORT_REASONS and reason not in result.reason_codes:

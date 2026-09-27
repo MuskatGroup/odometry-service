@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import resource
+import threading
 import time
 from collections import deque
 from dataclasses import replace
@@ -23,10 +24,11 @@ from odometry_core import (
 )
 from odometry_io import load_model_config
 from odometry_msgs.msg import LongitudinalEstimate
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 from sensor_msgs.msg import NavSatFix
-
 from tram_vehicle_msgs.msg import DriverControllerCommand, VelocitySensor
 
 from .conversion import estimate_message, ns, set_stamp
@@ -39,11 +41,32 @@ ANTENNAS = {
     "master": (-9.873, 0.0, 3.0),
     "rover": (2.563, 0.0, 3.0),
 }
+# Organizer topics are published RELIABLE with a tiny history depth (as little as 1): a reader that
+# asks for best-effort gets that writer's best-effort path and can silently miss samples whenever our
+# own processing (the 50 Hz tick, in particular) is briefly busy. Matching RELIABLE with a generous
+# depth lets DDS retry/queue instead of dropping.
+INPUT_QOS = QoSProfile(
+    reliability=QoSReliabilityPolicy.RELIABLE,
+    durability=QoSDurabilityPolicy.VOLATILE,
+    history=QoSHistoryPolicy.KEEP_LAST,
+    depth=200,
+)
 
 
 class ReserveOdometryNode(Node):
     def __init__(self, geometry=None, model_config=None, parameter_overrides=None):
         super().__init__("reserve_odometry", parameter_overrides=parameter_overrides)
+        # A single-threaded executor made the 50 Hz tick (which snapshots the whole estimator to
+        # predict/publish) and message reception take turns on one worker: while the tick was busy,
+        # DDS could not be drained, and a best-effort-treated organizer publisher (tiny history
+        # depth) silently lost wheel/control samples that arrived in that window. Subscriptions get
+        # their own reentrant group so receiving is never stuck behind the tick; the tick keeps a
+        # group of its own so overlapping ticks still cannot run concurrently. Both groups touch the
+        # same estimator, so every access is serialized through one lock regardless of which thread
+        # the executor happens to run it on.
+        self._lock = threading.Lock()
+        self._subscription_group = ReentrantCallbackGroup()
+        self._timer_group = MutuallyExclusiveCallbackGroup()
         defaults = {
             "vehicle_id": "default",
             "route_id": "",
@@ -98,7 +121,11 @@ class ReserveOdometryNode(Node):
             self.geometry = GeometryAdapter(pathgraph)
         self.estimator = AdaptiveOdometryEstimator(
             model_config,
-            grade_provider=lambda s: self.geometry.grade_at(self.route_id, s) if self.route_id else 0.0,
+            # Plain lambda, not a bound method: copy.deepcopy treats function objects as atomic and
+            # never recurses into their closure, so this survives advance_fixed_lag's preview copy.
+            # A bound method is deep-copied through __self__, dragging in the whole Node (locks and
+            # all) and raising "cannot pickle '_thread.lock' object".
+            grade_provider=lambda s: self._grade_at(s),
         )
         self.model_config = model_config
         self.sequence = 0
@@ -120,6 +147,7 @@ class ReserveOdometryNode(Node):
         self.wheel_lateness_ms = deque(maxlen=4096)
         self.late_input_count = 0
         self.too_late_input_count = 0
+        self.crash_count = 0
         reorder_ms = float(self.get_parameter("processing_delay_ms").value)
         if not math.isfinite(reorder_ms) or reorder_ms < 0:
             raise ValueError("processing_delay_ms must be finite and non-negative")
@@ -135,27 +163,69 @@ class ReserveOdometryNode(Node):
         self.create_subscription(
             VelocitySensor,
             "/vehicle/front_bogie_velocity",
-            lambda msg: self._wheel(msg, "front_bogie"),
-            qos_profile_sensor_data,
+            self._guard("wheel front", lambda msg: self._wheel(msg, "front_bogie")),
+            INPUT_QOS,
+            callback_group=self._subscription_group,
         )
         self.create_subscription(
             VelocitySensor,
             "/vehicle/rear_bogie_velocity",
-            lambda msg: self._wheel(msg, "rear_bogie"),
-            qos_profile_sensor_data,
+            self._guard("wheel rear", lambda msg: self._wheel(msg, "rear_bogie")),
+            INPUT_QOS,
+            callback_group=self._subscription_group,
         )
         self.create_subscription(
             DriverControllerCommand,
             "/vehicle/driver_position_cmd",
-            self._control,
-            qos_profile_sensor_data,
+            self._guard("control", self._control),
+            INPUT_QOS,
+            callback_group=self._subscription_group,
         )
         if self.gnss_policy != "disabled":
             self._create_gnss_subscriptions()
         rate = float(self.get_parameter("publish_rate_hz").value)
         if not math.isfinite(rate) or rate < 10.0:
             raise ValueError("publish_rate_hz must be finite and >= 10")
-        self.timer = self.create_timer(1.0 / rate, self._tick)
+        self.timer = self.create_timer(
+            1.0 / rate, self._guard("tick", self._tick), callback_group=self._timer_group
+        )
+
+    def _guard(self, name, callback):
+        """Wrap a callback so one bad message or a stray edge case cannot take the whole node down.
+
+        The production run is judged over one long, uninterrupted bag; a crash forfeits everything
+        after it, while a single skipped callback only costs one sample.
+        """
+
+        def _wrapped(*args, **kwargs):
+            try:
+                with self._lock:
+                    return callback(*args, **kwargs)
+            except Exception:  # noqa: BLE001 - last-resort guard, logged in full below
+                import traceback
+
+                self.crash_count += 1
+                self.get_logger().error(
+                    f"Unhandled exception in {name} callback (#{self.crash_count}), "
+                    f"node keeps running:\n{traceback.format_exc()}",
+                    throttle_duration_sec=1.0,
+                )
+                return None
+
+        return _wrapped
+
+    def _grade_at(self, s_m):
+        """Track grade at s, or flat ground once the estimate has drifted past the mapped route."""
+        if not self.route_id:
+            return 0.0
+        try:
+            return self.geometry.grade_at(self.route_id, s_m)
+        except (KeyError, ValueError):
+            self.get_logger().warning(
+                f"Predicted position s={s_m:.1f} m is outside Pathgraph; using flat grade",
+                throttle_duration_sec=5.0,
+            )
+            return 0.0
 
     def _next_sequence(self):
         self.sequence += 1
@@ -216,16 +286,21 @@ class ReserveOdometryNode(Node):
                 self.create_subscription(
                     NavSatFix,
                     f"/sensing/gnss/{receiver}/fix",
-                    lambda msg, name=receiver: self._fix(msg, name),
-                    qos_profile_sensor_data,
+                    self._guard(f"gnss fix {receiver}", lambda msg, name=receiver: self._fix(msg, name)),
+                    INPUT_QOS,
+                    callback_group=self._subscription_group,
                 )
             )
             self.gnss_subscriptions.append(
                 self.create_subscription(
                     TwistStamped,
                     f"/sensing/gnss/{receiver}/vel",
-                    lambda msg, name=receiver: self._velocity_correction(msg, name),
-                    qos_profile_sensor_data,
+                    self._guard(
+                        f"gnss velocity {receiver}",
+                        lambda msg, name=receiver: self._velocity_correction(msg, name),
+                    ),
+                    INPUT_QOS,
+                    callback_group=self._subscription_group,
                 )
             )
 
@@ -327,7 +402,14 @@ class ReserveOdometryNode(Node):
         if not self.route_id or self.estimator.t is None:
             self.prefilter_rejected_velocity += 1
             return
-        pose = self.geometry.body_pose_at(self.route_id, self.estimator.x[0])
+        try:
+            pose = self.geometry.body_pose_at(self.route_id, self.estimator.x[0])
+        except (KeyError, ValueError) as exc:
+            self.prefilter_rejected_velocity += 1
+            self.gnss_reasons.add("OUT_OF_GRAPH")
+            self.get_logger().warning(f"GNSS velocity correction outside Pathgraph: {exc}",
+                                       throttle_duration_sec=1.0)
+            return
         linear = msg.twist.linear
         velocity = float(linear.x) * math.cos(pose.yaw_rad) + float(linear.y) * math.sin(
             pose.yaw_rad
@@ -403,7 +485,9 @@ class ReserveOdometryNode(Node):
             velocity.header.frame_id = "base_link"
             velocity.velocity = result.v_mps
             self.velocity_publisher.publish(velocity)
-        if result.valid and map_pose is not None and result.covariance_4x4 is not None:
+        # Position only needs a known route and a finite s (map_pose implies both); it must not be
+        # withheld just because the *velocity* side is degraded (wheel staleness, model-only, ...).
+        if map_pose is not None and result.covariance_4x4 is not None:
             self.position_publisher.publish(self._odometry(result, map_pose, stamp))
         self._publish_diagnostics(result, compute_ms, stamp, map_pose is not None)
         self.last_publish_stamp = stamp
@@ -472,6 +556,7 @@ class ReserveOdometryNode(Node):
             KeyValue(key="wheel_lateness_p99_ms", value=f"{wheel_p99 or 0.0:.3f}"),
             KeyValue(key="late_input_count", value=str(self.late_input_count)),
             KeyValue(key="too_late_input_count", value=str(self.too_late_input_count)),
+            KeyValue(key="crash_count", value=str(self.crash_count)),
             KeyValue(key="input_to_publication_ms", value=f"{input_to_publication_ms:.6f}"),
             KeyValue(key="latency_samples", value=str(len(self.latency_ms))),
             KeyValue(key="latency_p95_ms", value=f"{latency_p95:.6f}"),
@@ -487,8 +572,21 @@ class ReserveOdometryNode(Node):
 def main():
     rclpy.init()
     node = ReserveOdometryNode()
+    # A single-threaded spin serialized message reception behind the 50 Hz tick; a matched but tiny
+    # organizer publisher history depth then silently dropped whatever arrived while the tick was
+    # busy. Two threads are enough: one drains subscriptions (their own reentrant group), the other
+    # runs the tick (its own group) — see the callback-group comment in __init__ for why that pairing
+    # is what actually needs the concurrency, and self._lock in _guard for how they stay safe together.
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
+    except Exception:
+        import traceback
+
+        node.get_logger().fatal(f"reserve_odometry_node is exiting unexpectedly:\n{traceback.format_exc()}")
+        raise
     finally:
+        executor.shutdown()
         node.destroy_node()
         rclpy.shutdown()
