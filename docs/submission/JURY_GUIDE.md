@@ -13,6 +13,10 @@
 
 API и web для работы алгоритма не нужны.
 
+Выданный организаторами приёмочный стенд и исходный check-bag сохранены без изменений
+в [`tests/check-code`](../../tests/check-code). Его `checker_ros` сравнивает
+`/result/velocity` и `/result/position` с `/localization/kinematic_state`.
+
 ## 2. Сборка ROS 2 Humble
 
 Требования: Ubuntu 22.04, ROS 2 Humble, Python 3.10, `python3-yaml`, пакеты

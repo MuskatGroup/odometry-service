@@ -10,6 +10,7 @@
 | Материал | Ссылка |
 |---|---|
 | ROS 2-пакеты | [`ros2_ws/src`](ros2_ws/src) |
+| Официальный стенд и check-bag | [`tests/check-code`](tests/check-code) |
 | Сборка, запуск rosbag, выходные топики и метрики | [`docs/submission/JURY_GUIDE.md`](docs/submission/JURY_GUIDE.md) |
 | Математическая модель | [`docs/submission/MODEL.md`](docs/submission/MODEL.md) |
 | Допущения, ограничения и параметры | [`docs/submission/CONFIGURATION.md`](docs/submission/CONFIGURATION.md) |
