@@ -14,8 +14,8 @@ from .benchmark import PRESETS, SCENARIOS, benchmark
 from .calibrate import apply_to_profile, calibrate, load_profile_config
 from .evaluate import evaluate
 from .exportrun import export_run
+from .realdata import GNSS_MODES, build_case, dedupe, load_split, real_benchmark
 from .realdata import SCENARIOS as REAL_SCENARIOS
-from .realdata import build_case, dedupe, load_split, real_benchmark
 from .runner import run
 from .scenario import generate
 from .storage import read_rows
@@ -147,6 +147,7 @@ def main():
     real.add_argument("--scenario", action="append", choices=tuple(REAL_SCENARIOS))
     real.add_argument("--preset", action="append")
     real.add_argument("--model-profile", help="Model YAML; adds the calibrated preset M1-cal")
+    real.add_argument("--gnss-mode", action="append", choices=GNSS_MODES)
     one = commands.add_parser("real-run", help="One real-bag run for the console (map, reference, estimate)")
     one.add_argument("--bag", required=True)
     one.add_argument("--scenario", choices=tuple(REAL_SCENARIOS), default="none")
@@ -157,6 +158,7 @@ def main():
     one.add_argument("--fault-start", type=float, default=50.0)
     one.add_argument("--fault-len", type=float, default=20.0)
     one.add_argument("--model-profile", default="configs/models/default.yaml")
+    one.add_argument("--gnss-mode", choices=GNSS_MODES, default="never")
     one.add_argument("--output", required=True)
     one.add_argument("--run-id")
     one.add_argument("--api", help="Console URL to upload the run to, e.g. http://localhost:8080")
@@ -229,6 +231,7 @@ def main():
             tuple(args.scenario or REAL_SCENARIOS),
             tuple(args.preset or PRESETS),
             args.window,
+            tuple(args.gnss_mode or ("never",)),
         )
     elif args.command == "real-run":
         PRESETS["M1-cal"] = ("adaptive-ekf", load_profile_config(args.model_profile))
@@ -238,7 +241,16 @@ def main():
         if case is None:
             raise SystemExit(f"{args.bag}: no usable GNSS-referenced excerpt")
         run_id = args.run_id or f"{args.bag}-{args.scenario}-{args.preset}"
-        export_run(case, args.scenario, args.preset, args.output, run_id, args.fault_start, args.fault_len)
+        export_run(
+            case,
+            args.scenario,
+            args.preset,
+            args.output,
+            run_id,
+            args.fault_start,
+            args.fault_len,
+            args.gnss_mode,
+        )
         if args.api:
             import_report(args.output, args.api)
     elif args.command == "calibrate-noise":

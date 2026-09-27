@@ -22,7 +22,8 @@ type Report = {
   reference?: { source: string; coverage: number }
   map?: { frame: string; route_id: string | null; routes: { route_id: string; xy: number[][] }[]
     reference: XY[]; estimate: XY[] }
-  corrections?: { available: boolean; reason?: string; accepted: unknown[]; rejected: unknown[] }
+  corrections?: { available: boolean; reason?: string; jump_m?: number | null
+    accepted: { kind: string; count: number }[]; rejected: { kind: string; count: number }[] }
 }
 const runs = ref<Run[]>([]), selected = ref(''), frames = ref<Frame[]>([])
 const report = ref<Report | null>(null), error = ref(''), connection = ref('Подключение…')
@@ -51,6 +52,8 @@ const metricValue = (key: string) => {
   return typeof value === 'number' ? value.toFixed(3) : '—'
 }
 const faults = computed(() => report.value?.fault_windows ?? [])
+const correctionCount = (items: { count: number }[] | undefined) =>
+  (items ?? []).reduce((total, item) => total + item.count, 0)
 async function json(url: string) {
   const response = await fetch(url)
   if (!response.ok) throw new Error('HTTP ' + response.status + ': ' + url)
@@ -268,8 +271,9 @@ onBeforeUnmount(() => {
         <p v-if="report?.corrections && !report.corrections.available" class="muted">
           Недоступны: {{ report.corrections.reason }}. Принятые и отклонённые коррекции появятся здесь
           после подключения ядра.</p>
-        <p v-else-if="report?.corrections">Принято: {{ report.corrections.accepted.length }},
-          отклонено: {{ report.corrections.rejected.length }}</p>
+        <p v-else-if="report?.corrections">Принято: {{ correctionCount(report.corrections.accepted) }},
+          отклонено: {{ correctionCount(report.corrections.rejected) }},
+          максимальный скачок: {{ report.corrections.jump_m?.toFixed(3) ?? '—' }} м</p>
         <p v-else class="muted">Нет данных о коррекциях для этого запуска.</p>
       </section>
       <section class="panel"><h2>События качества</h2>

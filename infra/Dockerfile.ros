@@ -6,7 +6,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /workspace
 COPY python/ python/
-RUN pip3 install --no-cache-dir ./python/odometry_core ./python/odometry_io ./python/odometry_lab pytest==8.4.2
+RUN pip3 install --no-cache-dir \
+    ./python/odometry_core \
+    ./python/odometry_geometry \
+    ./python/odometry_io \
+    ./python/odometry_lab \
+    pytest==8.4.2
 COPY ros2_ws/ ros2_ws/
 RUN source /opt/ros/humble/setup.bash && cd ros2_ws && colcon build
 COPY contracts/ contracts/

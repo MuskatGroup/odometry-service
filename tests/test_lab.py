@@ -57,7 +57,13 @@ def test_exact_estimate_and_interpolation(tmp_path):
 # --- real-bag lab (odometry_lab.realdata / calibrate) ----------------------------------------------
 
 import pytest  # noqa: E402
-from odometry_core import ControlSample, WheelSample  # noqa: E402
+from odometry_core import (  # noqa: E402
+    AlongTrackPositionCorrection,
+    ControlSample,
+    InitialState,
+    LongitudinalVelocityCorrection,
+    WheelSample,
+)
 from odometry_lab import realdata as rd  # noqa: E402
 from odometry_lab.calibrate import config_from_profile  # noqa: E402
 
@@ -118,6 +124,50 @@ def test_gnss_masks():
     with pytest.raises(ValueError):
         rd.gnss_availability(stamps, "sometimes")
     assert rd.gnss_availability([], "never") == []
+
+
+def test_gnss_reference_is_converted_to_ordered_corrections_and_ingested():
+    stamps = [k * NS // 10 for k in range(30)]
+    events = []
+    for k, stamp in enumerate(stamps):
+        events.extend(
+            [
+                ControlSample(stamp, 3 * k, 0.0),
+                WheelSample(stamp, 3 * k + 1, "front", 5.0),
+                WheelSample(stamp, 3 * k + 2, "rear", 5.0),
+            ]
+        )
+    truth = [
+        {
+            "stamp_ns": str(stamp),
+            "v_mps": 5.0,
+            "s_m": 5.0 * stamp / NS,
+            "route_id": "route-a",
+            "velocity_sigma_mps": 0.2,
+        }
+        for stamp in stamps
+    ]
+    case = rd.RealCase(
+        bag_id="synthetic",
+        vehicle_id="test",
+        window=rd.Window(stamps[0], stamps[-1]),
+        events=events,
+        truth=truth,
+        initial=InitialState(stamps[0], 0.0, 5.0),
+        reference_coverage=1.0,
+        route_id="route-a",
+    )
+
+    corrections = rd.correction_events(case, "initial")
+    assert len(corrections) == 2 * len(stamps)
+    assert isinstance(corrections[0], LongitudinalVelocityCorrection)
+    assert isinstance(corrections[1], AlongTrackPositionCorrection)
+    result = rd.run_case(case, "none", "M1", fault_start_s=10.0, gnss_mode="initial")
+    assert result["counts"]["accepted_gnss_velocity"] > 0
+    assert result["counts"]["accepted_gnss_position"] > 0
+    assert result["correction_jump_m"] is not None
+    with pytest.raises(ValueError, match="adaptive-ekf"):
+        rd.run_case(case, "none", "B0", gnss_mode="initial")
 
 
 def test_recovery_time_and_unavailable_when_never_recovered():

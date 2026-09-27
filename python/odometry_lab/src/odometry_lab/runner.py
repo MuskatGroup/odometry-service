@@ -6,9 +6,11 @@ from pathlib import Path
 
 from odometry_core import (
     AdaptiveOdometryEstimator,
+    AlongTrackPositionCorrection,
     ControlSample,
     EstimatorConfig,
     InitialState,
+    LongitudinalVelocityCorrection,
     ModelConfig,
     OdometryEstimator,
 )
@@ -32,8 +34,31 @@ def _percentile(values, quantile):
 def ingest(estimator, event):
     if isinstance(event, ControlSample):
         estimator.ingest_control(event)
+    elif isinstance(event, LongitudinalVelocityCorrection):
+        if not hasattr(estimator, "ingest_velocity_correction"):
+            raise ValueError("Selected estimator does not support GNSS velocity corrections")
+        estimator.ingest_velocity_correction(event)
+    elif isinstance(event, AlongTrackPositionCorrection):
+        if not hasattr(estimator, "ingest_position_correction"):
+            raise ValueError("Selected estimator does not support GNSS position corrections")
+        estimator.ingest_position_correction(event)
     else:
         estimator.ingest_wheel(event)
+
+
+def estimator_counts(estimator):
+    if hasattr(estimator, "counts"):
+        return dict(estimator.counts)
+    counts = {"accepted_wheels": estimator.accepted, "rejected_wheels": estimator.rejected}
+    for name in (
+        "accepted_gnss_velocity",
+        "rejected_gnss_velocity",
+        "accepted_gnss_position",
+        "rejected_gnss_position",
+    ):
+        if hasattr(estimator, name):
+            counts[name] = getattr(estimator, name)
+    return counts
 
 
 def create_estimator(name="wheel-hold", model_config=None):
@@ -79,11 +104,7 @@ def run_events(events, initial=None, config=None, hz=50, tail_s=0.0, estimator_n
         frame = estimator.advance_to(endpoint).to_dict()
         frame["compute_ms"] = None
         output.append(frame)
-    if hasattr(estimator, "counts"):
-        counts = dict(estimator.counts)
-    else:
-        counts = {"accepted_wheels": estimator.accepted, "rejected_wheels": estimator.rejected}
-    return output, counts
+    return output, estimator_counts(estimator)
 
 
 async def run_websocket(
@@ -135,12 +156,7 @@ async def run_websocket(
         await asyncio.gather(task, return_exceptions=True)
     if not events:
         raise ValueError("Source supplied no usable events")
-    counts = (
-        dict(estimator.counts)
-        if hasattr(estimator, "counts")
-        else {"accepted_wheels": estimator.accepted, "rejected_wheels": estimator.rejected}
-    )
-    return events, estimates, counts
+    return events, estimates, estimator_counts(estimator)
 
 
 def run(

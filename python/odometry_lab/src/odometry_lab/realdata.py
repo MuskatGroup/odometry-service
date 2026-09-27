@@ -17,7 +17,13 @@ from bisect import bisect_left
 from dataclasses import dataclass
 from pathlib import Path
 
-from odometry_core import ControlSample, InitialState, WheelSample
+from odometry_core import (
+    AlongTrackPositionCorrection,
+    ControlSample,
+    InitialState,
+    LongitudinalVelocityCorrection,
+    WheelSample,
+)
 from odometry_core.types import event_key
 
 from .benchmark import PRESETS
@@ -29,6 +35,8 @@ REPO = Path(__file__).resolve().parents[4]
 NOTCHES = 15
 WHEEL_KMH_TO_MPS = 1.0 / 3.6
 NS = 1_000_000_000
+GNSS_POSITION_VARIANCE_M2 = 4.0
+GNSS_VELOCITY_SIGMA_FLOOR_MPS = 0.1
 
 # name -> (fault kind, affected wheel channels); "none" is the clean run
 SCENARIOS: dict[str, tuple[str, tuple[str, ...]]] = {
@@ -80,6 +88,11 @@ def load_reference(path: str | Path) -> list[dict]:
                     "v": float(row["v_ref"]) if row["v_ref"] else None,
                     "s": float(row["s_ref"]) if row["s_ref"] else None,
                     "route": row.get("route_id") or None,
+                    "velocity_sigma": (
+                        float(row["reference_uncertainty"])
+                        if row.get("reference_uncertainty")
+                        else None
+                    ),
                 }
             )
     return rows
@@ -130,7 +143,16 @@ def build_case(bag_dir: str | Path, reference_csv: str | Path, window_s: float =
     rows = [r for r in in_window if r["v"] is not None]
     with_s = [r for r in rows if r["s"] is not None]
     s0 = with_s[0]["s"]
-    truth = [{"stamp_ns": str(r["stamp_ns"]), "v_mps": r["v"], "s_m": r["s"] - s0} for r in with_s]
+    truth = [
+        {
+            "stamp_ns": str(r["stamp_ns"]),
+            "v_mps": r["v"],
+            "s_m": r["s"] - s0,
+            "route_id": r["route"],
+            "velocity_sigma_mps": r["velocity_sigma"],
+        }
+        for r in with_s
+    ]
     events = [e for e in events_from_bag(bag) if window.start_ns <= e.stamp_ns <= window.end_ns]
     if not events:
         return None
@@ -202,6 +224,47 @@ def gnss_availability(stamps_ns: list[int], mode: str) -> list[bool]:
     return out
 
 
+def correction_events(case: RealCase, mode: str) -> list:
+    """Build GNSS-derived correction events without exposing the reference to wheel processing."""
+    stamps = [int(row["stamp_ns"]) for row in case.truth]
+    available = gnss_availability(stamps, mode)
+    events = []
+    for seq, (row, enabled) in enumerate(zip(case.truth, available, strict=True)):
+        if not enabled:
+            continue
+        stamp = int(row["stamp_ns"])
+        speed = row.get("v_mps")
+        if speed is not None:
+            sigma = max(
+                GNSS_VELOCITY_SIGMA_FLOOR_MPS,
+                float(row.get("velocity_sigma_mps") or GNSS_VELOCITY_SIGMA_FLOOR_MPS),
+            )
+            events.append(
+                LongitudinalVelocityCorrection(stamp, seq, float(speed), sigma**2, "gnss-reference")
+            )
+        route_id = row.get("route_id") or case.route_id
+        position = row.get("s_m")
+        if route_id and position is not None:
+            events.append(
+                AlongTrackPositionCorrection(
+                    stamp,
+                    seq,
+                    route_id,
+                    float(position),
+                    GNSS_POSITION_VARIANCE_M2,
+                    "gnss-reference",
+                )
+            )
+    return sorted(events, key=event_key)
+
+
+def events_for_run(case: RealCase, scenario: str, start_ns: int, end_ns: int, gnss_mode: str) -> list:
+    kind, channels = SCENARIOS[scenario]
+    events = inject(case.events, kind, channels, start_ns, end_ns)
+    events.extend(correction_events(case, gnss_mode))
+    return sorted(events, key=event_key)
+
+
 # --- scoring -----------------------------------------------------------------------------------
 
 
@@ -235,6 +298,32 @@ def _percentile(values: list[float], q: float) -> float | None:
     return values[min(len(values) - 1, round((len(values) - 1) * q))]
 
 
+def correction_jump_m(frames: list[dict], corrections: list) -> float | None:
+    """Largest position discontinuity unexplained by trapezoidal velocity integration."""
+    position_stamps = {
+        event.stamp_ns for event in corrections if isinstance(event, AlongTrackPositionCorrection)
+    }
+    if not position_stamps:
+        return None
+    jumps = []
+    previous = None
+    for frame in frames:
+        stamp = int(frame["stamp_ns"])
+        if previous is not None and stamp in position_stamps:
+            dt = (stamp - int(previous["stamp_ns"])) / NS
+            if (
+                dt >= 0
+                and frame.get("s_m") is not None
+                and previous.get("s_m") is not None
+                and frame.get("v_mps") is not None
+                and previous.get("v_mps") is not None
+            ):
+                expected = 0.5 * (previous["v_mps"] + frame["v_mps"]) * dt
+                jumps.append(abs((frame["s_m"] - previous["s_m"]) - expected))
+        previous = frame
+    return max(jumps, default=None)
+
+
 def peak_rss_mb() -> float | None:
     try:
         import resource  # POSIX only
@@ -243,12 +332,22 @@ def peak_rss_mb() -> float | None:
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
 
 
-def run_case(case: RealCase, scenario: str, preset: str, fault_start_s=50.0, fault_len_s=20.0) -> dict:
+def run_case(
+    case: RealCase,
+    scenario: str,
+    preset: str,
+    fault_start_s=50.0,
+    fault_len_s=20.0,
+    gnss_mode="never",
+) -> dict:
     kind, channels = SCENARIOS[scenario]
     start = case.window.start_ns + round(fault_start_s * NS)
     end = start + round(fault_len_s * NS)
-    events = inject(case.events, kind, channels, start, end)
     estimator_name, model_config = PRESETS[preset]
+    if gnss_mode != "never" and estimator_name != "adaptive-ekf":
+        raise ValueError("GNSS correction modes require the adaptive-ekf estimator")
+    corrections = correction_events(case, gnss_mode)
+    events = events_for_run(case, scenario, start, end, gnss_mode)
     frames, counts = run_events(
         events, initial=case.initial, config=model_config, estimator_name=estimator_name, hz=50
     )
@@ -278,6 +377,7 @@ def run_case(case: RealCase, scenario: str, preset: str, fault_start_s=50.0, fau
         "vehicle": case.vehicle_id,
         "scenario": scenario,
         "preset": preset,
+        "gnss_mode": gnss_mode,
         "speed_rmse_mps": metrics["speed_rmse_mps"],
         "speed_mae_mps": metrics["speed_mae_mps"],
         "speed_bias_mps": metrics["speed_bias_mps"],
@@ -290,22 +390,22 @@ def run_case(case: RealCase, scenario: str, preset: str, fault_start_s=50.0, fau
         "compute_p95_ms": _percentile(timings, 0.95),
         "compute_p99_ms": _percentile(timings, 0.99),
         "compute_max_ms": max(timings, default=None),
-        "correction_jump_m": None,  # unavailable until the core accepts GNSS corrections
+        "correction_jump_m": correction_jump_m(frames, corrections),
         "reference_coverage": case.reference_coverage,
         "counts": counts,
     }
 
 
 def summarize(rows: list[dict]) -> list[dict]:
-    """Mean over bags for each (scenario, preset); a metric missing in every row stays None."""
+    """Mean over bags for each (scenario, preset, GNSS mode); missing metrics stay None."""
     keys = ("speed_rmse_mps", "speed_bias_mps", "speed_p95_abs_mps", "position_rmse_m",
             "final_position_error_m", "availability", "model_only_fraction", "recovery_s")  # fmt: skip
-    grouped: dict[tuple[str, str], list[dict]] = {}
+    grouped: dict[tuple[str, str, str], list[dict]] = {}
     for row in rows:
-        grouped.setdefault((row["scenario"], row["preset"]), []).append(row)
+        grouped.setdefault((row["scenario"], row["preset"], row.get("gnss_mode", "never")), []).append(row)
     out = []
-    for (scenario, preset), items in grouped.items():
-        entry = {"scenario": scenario, "preset": preset, "bags": len(items)}
+    for (scenario, preset, gnss_mode), items in grouped.items():
+        entry = {"scenario": scenario, "preset": preset, "gnss_mode": gnss_mode, "bags": len(items)}
         for key in keys:
             values = [i[key] for i in items if i[key] is not None]
             entry[key] = sum(values) / len(values) if values else None
@@ -325,6 +425,7 @@ def real_benchmark(
     scenarios=tuple(SCENARIOS),
     presets=tuple(PRESETS),
     window_s: float = 120.0,
+    gnss_modes=("never",),
 ) -> list[dict]:
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
@@ -336,7 +437,11 @@ def real_benchmark(
             continue
         for scenario in scenarios:
             for preset in presets:
-                rows.append(run_case(case, scenario, preset))
+                for gnss_mode in gnss_modes:
+                    estimator_name, _ = PRESETS[preset]
+                    if gnss_mode != "never" and estimator_name != "adaptive-ekf":
+                        continue
+                    rows.append(run_case(case, scenario, preset, gnss_mode=gnss_mode))
     summary = summarize(rows)
     write_json(
         output / "real-benchmark.json",
@@ -344,18 +449,18 @@ def real_benchmark(
             "window_s": window_s,
             "bags": [b for b in bags if b not in skipped],
             "skipped": skipped,
-            "gnss_presets": "unavailable: core has no GNSS correction API yet",
+            "gnss_modes": list(gnss_modes),
             "summary": summary,
             "rows": rows,
         },
     )
     lines = [
-        "| Scenario | Preset | Bags | Speed RMSE | Bias | p95 | Path RMSE | Availability | Model-only | Recovery s |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Scenario | Preset | GNSS | Bags | Speed RMSE | Bias | p95 | Path RMSE | Availability | Model-only | Recovery s |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
-    for e in sorted(summary, key=lambda r: (r["scenario"], r["preset"])):
+    for e in sorted(summary, key=lambda r: (r["scenario"], r["preset"], r["gnss_mode"])):
         lines.append(
-            f"| {e['scenario']} | {e['preset']} | {e['bags']} | {_fmt(e['speed_rmse_mps'])} | "
+            f"| {e['scenario']} | {e['preset']} | {e['gnss_mode']} | {e['bags']} | {_fmt(e['speed_rmse_mps'])} | "
             f"{_fmt(e['speed_bias_mps'])} | {_fmt(e['speed_p95_abs_mps'])} | {_fmt(e['position_rmse_m'], 2)} | "
             f"{_fmt(e['availability'])} | {_fmt(e['model_only_fraction'])} | {_fmt(e['recovery_s'], 1)} |"
         )

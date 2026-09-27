@@ -134,13 +134,15 @@ dv/dt = a_act − c1·v − c2·v·|v| − g·grade
 
 Вычислительная нагрузка (M1-cal, 50 Гц): p99 задержки шага 0,17 мс, максимум 5,9 мс.
 
-## 5. Метрики, которых нет
+## 5. GNSS-коррекции и недоступные метрики
 
-Не выдаются, а не подменяются нулями (`null` / `n/a`):
+Failure Lab принимает GNSS-derived reference как вход коррекции только в явно выбранных
+режимах `initial` и `intermittent-*`. Для EKF публикуются количества принятых/отклонённых
+position/velocity corrections и `correction_jump_m`. Режим `never` остаётся честным тестом
+резервной одометрии без коррекций.
 
-- **GNSS-коррекции** (режимы `initial`, `intermittent`, пресет «EKF + GNSS»): ядро пока
-  не принимает коррекции. Сценарии реализованы (`gnss_availability`), запускать их нечем.
-- **Скачок при коррекции**: `correction_jump_m = None` по той же причине.
+Следующие метрики не выдаются, а не подменяются нулями (`null` / `n/a`):
+
 - **XYZ-ошибка** считается пока только вдоль пути.
 - **Потребление памяти (RSS)**: на Windows недоступно, замеряется на Linux в Docker.
 - **Калиброванная неопределённость**: ковариация EKF публикуется, но не проверена на
@@ -160,7 +162,8 @@ python -m odometry_lab.cli calibrate-noise --profile configs/models/default.yaml
 python dataset/analysis/identify_model.py --evaluate-test
 # 5) сравнение пресетов на test
 python -m odometry_lab.cli real-benchmark --output artifacts/real-test --subset test \
-    --model-profile configs/models/default.yaml
+    --model-profile configs/models/default.yaml \
+    --gnss-mode never --gnss-mode initial --gnss-mode intermittent-60
 ```
 
 ## 7. Ограничения

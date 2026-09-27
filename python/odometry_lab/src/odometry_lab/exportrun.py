@@ -16,7 +16,9 @@ from .realdata import (
     SCENARIOS,
     RealCase,
     _percentile,
-    inject,
+    correction_events,
+    correction_jump_m,
+    events_for_run,
 )
 from .runner import run_events
 from .storage import write_json, write_rows
@@ -77,13 +79,17 @@ def export_run(
     run_id: str,
     fault_start_s: float = 50.0,
     fault_len_s: float = 20.0,
+    gnss_mode: str = "never",
 ) -> dict:
     """Run one case; write run.json / estimates.jsonl / report.json that ``import-report`` uploads."""
     kind, channels = SCENARIOS[scenario]
     start = case.window.start_ns + round(fault_start_s * NS)
     end = start + round(fault_len_s * NS)
-    events = inject(case.events, kind, channels, start, end)
     estimator_name, model_config = PRESETS[preset]
+    if gnss_mode != "never" and estimator_name != "adaptive-ekf":
+        raise ValueError("GNSS correction modes require the adaptive-ekf estimator")
+    corrections = correction_events(case, gnss_mode)
+    events = events_for_run(case, scenario, start, end, gnss_mode)
     frames, counts = run_events(
         events, initial=case.initial, config=model_config, estimator_name=estimator_name, hz=50
     )
@@ -108,6 +114,7 @@ def export_run(
         "bag": case.bag_id,
         "vehicle_id": case.vehicle_id,
         "preset": preset,
+        "gnss_mode": gnss_mode,
         "window_s": (case.window.end_ns - case.window.start_ns) / NS,
     }
     report["reference"] = {
@@ -115,11 +122,22 @@ def export_run(
         "coverage": case.reference_coverage,
     }
     report["map"] = map_block(case, frames)
+    accepted = [
+        {"kind": "velocity", "count": counts.get("accepted_gnss_velocity", 0)},
+        {"kind": "position", "count": counts.get("accepted_gnss_position", 0)},
+    ]
+    rejected = [
+        {"kind": "velocity", "count": counts.get("rejected_gnss_velocity", 0)},
+        {"kind": "position", "count": counts.get("rejected_gnss_position", 0)},
+    ]
     report["corrections"] = {
-        "available": False,
-        "reason": "GNSS corrections are not implemented in the estimator core yet",
-        "accepted": [],
-        "rejected": [],
+        "available": bool(corrections),
+        "reason": None if corrections else "GNSS corrections are disabled for this run",
+        "mode": gnss_mode,
+        "requested": len(corrections),
+        "accepted": accepted,
+        "rejected": rejected,
+        "jump_m": correction_jump_m(frames, corrections),
     }
     write_json(output / "report.json", report)
     timings = [f["compute_ms"] for f in frames if f.get("compute_ms") is not None]
@@ -134,6 +152,7 @@ def export_run(
             "synthetic": False,
             "scenario": scenario,
             "preset": preset,
+            "gnss_mode": gnss_mode,
             "diagnostics": counts,
             "compute_ms": {"p95": _percentile(timings, 0.95), "max": max(timings, default=None)},
         },

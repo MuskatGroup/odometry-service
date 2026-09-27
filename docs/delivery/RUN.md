@@ -13,7 +13,7 @@
 ```bash
 ros2 launch odometry_node reserve.launch.py \
   vehicle_id:=30618 \
-  route_id:=tallinskaya_to_shchukinskaya \
+  route_id:=tallinskaya-shchukinskaya \
   s0:=0.0 \
   gnss_policy:=disabled \
   pathgraph_directory:=/workspace/dataset/Pathgraph \
