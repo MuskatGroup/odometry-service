@@ -24,9 +24,9 @@ from pathlib import Path
 
 from odometry_core import InitialState
 from odometry_io import load_model_config
+from odometry_lab.evaluate import evaluate
 from odometry_lab.realdata import _tram_bag, events_from_bag, load_reference
 from odometry_lab.runner import run_events
-from odometry_lab.evaluate import evaluate
 from odometry_lab.storage import write_json, write_rows
 
 REPO = Path(__file__).resolve().parents[1]

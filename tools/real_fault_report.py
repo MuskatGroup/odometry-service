@@ -14,8 +14,8 @@ import argparse
 import json
 from pathlib import Path
 
-from odometry_lab.realdata import PRESETS, dedupe, load_split, real_benchmark
 from odometry_io import load_model_config
+from odometry_lab.realdata import PRESETS, dedupe, load_split, real_benchmark
 
 REPO = Path(__file__).resolve().parents[1]
 
