@@ -1,8 +1,0 @@
-version: "0.1"
-layout: wide
-time: {field: time_s, unit: s, clock: scenario}
-seq_field: seq
-control: {field: handle, mapping: table, values: {"0": 0, "1": 0.5, "-1": -0.5}}
-wheels:
-  - {id: left, field: left_kmh, unit: km/h}
-  - {id: right, field: right_rpm, unit: rpm, radius_m: 0.3}

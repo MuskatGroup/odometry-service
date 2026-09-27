@@ -1,88 +1,23 @@
 services:
-  console:
-    build:
-      context: .
-      dockerfile: infra/Dockerfile.console
-    ports: ["127.0.0.1:8080:8080"]
-    volumes: ["console-data:/data"]
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/health"]
-      interval: 3s
-      timeout: 2s
-      retries: 30
-
-  demo:
-    profiles: ["demo"]
-    build:
-      context: .
-      dockerfile: infra/Dockerfile.lab
-    command: ["demo", "--output", "/artifacts/demo", "--api", "http://console:8080"]
-    volumes: ["./artifacts:/artifacts"]
-    depends_on:
-      console: {condition: service_healthy}
-
-  seed:
-    profiles: ["ros"]
-    build:
-      context: .
-      dockerfile: infra/Dockerfile.lab
-    command: ["generate", "--output", "/artifacts/ros"]
-    volumes: ["./artifacts:/artifacts"]
-
-  estimator:
-    profiles: ["ros"]
-    build:
-      context: .
-      dockerfile: infra/Dockerfile.ros
-    command: ["ros2", "run", "odometry_node", "estimator", "--ros-args", "-p", "input_mode:=batch", "-p", "run_id:=ros-demo", "-p", "use_sim_time:=true"]
-    environment: {ROS_DOMAIN_ID: "42"}
-
-  replay:
-    profiles: ["ros"]
-    build:
-      context: .
-      dockerfile: infra/Dockerfile.ros
-    command: ["ros2", "run", "odometry_node", "replay", "--ros-args", "-p", "source:=/artifacts/ros/events.jsonl"]
-    volumes: ["./artifacts:/artifacts:ro"]
-    environment: {ROS_DOMAIN_ID: "42"}
-    depends_on:
-      seed: {condition: service_completed_successfully}
-      estimator: {condition: service_started}
-      bridge: {condition: service_started}
-
-  bridge:
-    profiles: ["ros"]
-    build:
-      context: .
-      dockerfile: infra/Dockerfile.ros
-    command: ["ros2", "run", "odometry_node", "telemetry_bridge"]
-    environment: {ROS_DOMAIN_ID: "42"}
-    depends_on:
-      console: {condition: service_healthy}
-
-  ros-tests:
-    profiles: ["test"]
-    build:
-      context: .
-      dockerfile: infra/Dockerfile.ros
-    command: ["python3", "-m", "pytest", "-q", "tests/integration"]
-    environment: {ROS_DOMAIN_ID: "73", RUN_ROS_TESTS: "1"}
-
   reserve:
-    profiles: ["reserve"]
-    image: odometry-ros:validation
+    image: reserve-odometry:submission
     build:
       context: .
       dockerfile: infra/Dockerfile.ros
     cpus: 2
     mem_limit: 512m
-    environment: {ROS_DOMAIN_ID: "75"}
+    environment:
+      ROS_DOMAIN_ID: "75"
     volumes:
-      - ./dataset/data:/bags:ro
-      - ./dataset/derived:/reference:ro
-      - ./tests/check-code/bags:/check-bags:ro
       - ./artifacts:/artifacts
-      - ./tools:/tools:ro
 
-volumes:
-  console-data:
+  ros-tests:
+    profiles: ["test"]
+    image: reserve-odometry:submission
+    build:
+      context: .
+      dockerfile: infra/Dockerfile.ros
+    command: ["python3", "-m", "pytest", "-q", "tests"]
+    environment:
+      ROS_DOMAIN_ID: "73"
+      RUN_ROS_TESTS: "1"

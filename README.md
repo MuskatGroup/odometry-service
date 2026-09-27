@@ -1,61 +1,58 @@
-# odometry-service
+# Резервная одометрия трамвая
 
-Решение для хакатона: резервная одометрия трамвая по положению ручки контроллера и
-скорости вращения колёс, с ROS 2 Humble runtime, Pathgraph/MGRS и Failure Lab.
+Решение хакатона: ROS 2 Humble-нода оценивает продольные ускорение, скорость и
+положение трамвая по команде контроллера и скоростям двух тележек. GNSS не нужен
+в основном режиме; он может использоваться только для начальной привязки или
+разрешённой периодической коррекции.
 
-## Запуск
+## Материалы для жюри
 
-Обязательное решение для проверки — ROS-нода (сайт для неё не нужен):
+| Материал | Ссылка |
+|---|---|
+| ROS 2-пакеты | [`ros2_ws/src`](ros2_ws/src) |
+| Сборка, запуск rosbag, выходные топики и метрики | [`docs/submission/JURY_GUIDE.md`](docs/submission/JURY_GUIDE.md) |
+| Математическая модель | [`docs/submission/MODEL.md`](docs/submission/MODEL.md) |
+| Допущения, ограничения и параметры | [`docs/submission/CONFIGURATION.md`](docs/submission/CONFIGURATION.md) |
+| Точность и быстродействие | [`docs/submission/VALIDATION.md`](docs/submission/VALIDATION.md) |
+| Ограничения и план развития | [`docs/submission/ROADMAP.md`](docs/submission/ROADMAP.md) |
+
+## Контракт
+
+Входы:
+
+- `/vehicle/front_bogie_velocity` — `tram_vehicle_msgs/msg/VelocitySensor`, км/ч;
+- `/vehicle/rear_bogie_velocity` — `tram_vehicle_msgs/msg/VelocitySensor`, км/ч;
+- `/vehicle/driver_position_cmd` — `tram_vehicle_msgs/msg/DriverControllerCommand`, `[-15; 15]`.
+
+Обязательные выходы:
+
+- `/result/velocity` — `tram_vehicle_msgs/msg/VelocitySensor`, м/с;
+- `/result/position` — `nav_msgs/msg/Odometry`, положение `base_link` в `map`.
+
+Расширенные выходы:
+
+- `/odometry/estimate` — состояние фильтра, ускорение, covariance и состояние колёс;
+- `/odometry/diagnostics` — задержка, частота, CPU/RSS и счётчики ошибок.
+
+## Быстрый старт
 
 ```bash
-docker compose --profile reserve build reserve
-docker compose --profile reserve run --rm reserve
+docker compose build reserve
+docker compose run --rm reserve bash
+
+# внутри контейнера
+source /opt/ros/humble/setup.bash
+source /workspace/ros2_ws/install/setup.bash
+ros2 launch odometry_node reserve.launch.py \
+  vehicle_id:=30618 \
+  route_id:=shchukinskaya_to_tallinskaya \
+  s0:=76.70021572499135 \
+  initial_v_mps:=8.264238620430273 \
+  gnss_policy:=disabled \
+  use_sim_time:=true
 ```
 
-По умолчанию запускается режим без GNSS, с относительной продольной координатой.
-Для rosbag, начальной привязки к карте и автоматического отчёта — [инструкция запуска](docs/delivery/RUN.md).
+Подробная проверка и воспроизведение результата описаны в
+[`JURY_GUIDE.md`](docs/submission/JURY_GUIDE.md).
 
-Веб-демонстрация запускается отдельно:
-
-```bash
-docker compose --profile demo up --build
-```
-
-После завершения генерации откройте [localhost:8080](http://localhost:8080). Это
-синтетический веб-стенд; обязательный запуск production ROS-ноды описан отдельно.
-
-Реализованы gray-box модель тяги и продольной динамики, четырёхсостоянийный EKF,
-поканальная защита от отказов колёс, GNSS-политики, ROS-пакеты, Failure Lab,
-ASP.NET Core/SignalR/SQLite и Vue. Онлайн-ML не используется. Результат не предназначен
-для управления реальным транспортом до независимой проверки.
-
-## Предлагаемое решение
-
-Продольная модель движения предсказывает скорость по управлению. Наблюдатель корректирует прогноз по достоверным колесным измерениям, ослабляет их влияние при подозрении на проскальзывание и продолжает прогноз при отказе датчиков. Положение вдоль пути получается интегрированием скорости; вместе с ним публикуются неопределенность и состояние качества.
-
-Стек MVP: **Python + ROS 2 Humble** для алгоритма и нод, **ASP.NET Core + Vue 3/TypeScript** для стенда экспериментов и демонстрации.
-
-## Текущие улучшения и метрики
-
-Исправлено преждевременное восстановление доверия к залипшим датчикам при отпускании
-контроллера. После проверки на validation выполнен финальный прогон 13 test-записей:
-при двойном залипании средняя RMSE скорости снизилась с 1,462 до 0,274 м/с,
-пути — с 43,33 до 4,70 м. Чистый сценарий практически не изменился.
-Параметры модели не переобучались. Все численные оценки, включая невалидные, входят
-в расчёт ошибок; ограничения и регрессии тоже приведены в отчёте.
-
-Методика, таблицы до/после и команда сравнения —
-[проверка защиты от залипания](docs/delivery/FREEZE_VALIDATION.md).
-Предыдущие длительные ROS-прогоны — [проверка runtime](docs/delivery/RUNTIME_VALIDATION.md).
-
-## Документы
-
-Начинать с [комплекта сдачи и статуса готовности](docs/delivery/README.md). Там указано,
-что реализовано по каждому пункту задания, что проверено на ROS/rosbag и какие ограничения остаются.
-
-[Навигация и статусы документов](docs/README.md) отделяют действующие спецификации от
-исторических материалов.
-
-История распределения разработки сохранена в
-[плане для двух разработчиков](docs/23-parallel-implementation-handoff.md), но он больше
-не является инструкцией финального запуска.
+Лицензия: [MIT](LICENSE).

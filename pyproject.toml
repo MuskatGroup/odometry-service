@@ -1,40 +1,23 @@
 [project]
-name = "odometry-workspace"
-version = "0.1.0"
+name = "reserve-odometry-workspace"
+version = "1.0.0"
 requires-python = ">=3.10"
-dependencies = ["odometry-core", "odometry-geometry", "odometry-io", "odometry-lab"]
+dependencies = ["odometry-core", "odometry-geometry", "odometry-io"]
 
 [dependency-groups]
-dev = ["pytest>=8,<9", "pytest-asyncio>=0.24,<1", "ruff>=0.11,<1"]
-analysis = [
-    "ipykernel>=7,<8",
-    "jupyterlab>=4,<5",
-    "matplotlib>=3.10,<4",
-    "pandas>=2.3,<3",
-    "pyproj>=3.7,<4",
-    "rosbags>=0.11,<0.12",
-    "seaborn>=0.13,<0.14",
-]
+dev = ["pytest>=8,<9", "ruff>=0.11,<1"]
 
 [tool.uv.workspace]
-members = ["python/*"]
+members = ["python/odometry_core", "python/odometry_geometry", "python/odometry_io"]
 
 [tool.uv.sources]
 odometry-core = { workspace = true }
 odometry-geometry = { workspace = true }
 odometry-io = { workspace = true }
-odometry-lab = { workspace = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 norecursedirs = ["check-code"]
-asyncio_mode = "auto"
-# tests/check-code is the organizers' checker package (hackathon_solution_checker), vendored
-# read-only: its own test needs a built ROS environment (rclpy, message_filters) that plain
-# `pytest -q` from the repo root does not have, so collecting it breaks the whole run. Run it
-# inside the ROS container instead: colcon test --packages-select hackathon_solution_checker
-# (organizer audit, 2026-09-27).
-addopts = "--ignore=tests/check-code"
 
 [tool.ruff]
 target-version = "py310"

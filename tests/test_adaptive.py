@@ -9,9 +9,6 @@ from odometry_core import (
     ModelConfig,
     WheelSample,
 )
-from odometry_io import probe
-from odometry_lab.evaluate import evaluate
-from odometry_lab.storage import write_rows
 
 
 def test_moving_start_bootstraps_once_without_disabling_subsequent_gates():
@@ -303,57 +300,3 @@ def test_drive_map_interpolation_and_grade_change_prediction():
         estimator.initialize(InitialState(0, 0, 5), config)
         estimator.ingest_control(ControlSample(0, 0, 0.75))
     assert uphill.advance_to(1_000_000_000).v_mps < flat.advance_to(1_000_000_000).v_mps
-
-
-def test_probe_writes_review_required_draft(tmp_path):
-    source = tmp_path / "sample.csv"
-    source.write_text("timestamp_ns,handle,wheel_left_mps,wheel_right_mps\n0,0,1,1\n", encoding="utf-8")
-    result = probe(source)
-    assert result["profile"]["layout"] == "wide"
-    assert len(result["profile"]["wheels"]) == 2
-    assert any("REVIEW_REQUIRED" in warning for warning in result["warnings"])
-
-
-def test_extended_metrics_and_fault_drift(tmp_path):
-    estimates = tmp_path / "estimates.jsonl"
-    truth = tmp_path / "truth.jsonl"
-    faults = tmp_path / "faults.jsonl"
-    write_rows(
-        estimates,
-        [
-            {
-                "stamp_ns": "0",
-                "v_mps": 1.0,
-                "s_m": 0.0,
-                "valid": True,
-                "mode": "FUSED",
-                "reason_codes": [],
-                "sigma_v_mps": 0.2,
-            },
-            {
-                "stamp_ns": "1000000000",
-                "v_mps": 2.0,
-                "s_m": 1.5,
-                "valid": True,
-                "mode": "DEGRADED",
-                "reason_codes": ["WHEEL_REJECTED"],
-                "sigma_v_mps": 0.2,
-            },
-        ],
-    )
-    write_rows(
-        truth,
-        [
-            {"stamp_ns": "0", "v_mps": 1.0, "s_m": 0.0},
-            {"stamp_ns": "1000000000", "v_mps": 1.0, "s_m": 1.0},
-        ],
-    )
-    write_rows(faults, [{"type": "slip", "start_ns": "0", "end_ns": "1000000000"}])
-    report = evaluate(estimates, truth, faults_path=faults)
-    assert report["metrics"]["speed_max_abs_mps"] == 1.0
-    assert report["metrics"]["mode_fraction"]["DEGRADED"] == 0.5
-    assert report["fault_windows"][0]["position_drift_m"] == 0.5
-    # Criterion 2 asks for end-of-run drift relative to distance travelled, not just metres: the
-    # tram covered 1.0 m of truth here and ended up 0.5 m off, i.e. 50%.
-    assert report["metrics"]["distance_traveled_m"] == pytest.approx(1.0)
-    assert report["metrics"]["final_drift_pct_of_distance"] == pytest.approx(50.0)
