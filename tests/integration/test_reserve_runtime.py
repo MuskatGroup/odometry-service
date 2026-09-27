@@ -151,7 +151,21 @@ def test_gnss_close_is_safe_with_inflight_multithreaded_callbacks():
         while not all(p.get_subscription_count() for p in publishers):
             assert time.monotonic() < deadline
             time.sleep(0.01)
-        for _ in range(60):
+        # Keep a steady flood of inflight fixes landing on the reentrant GNSS subscriptions
+        # while the node closes its GNSS initialization window on the timer thread, instead of
+        # a fixed publish count/sleep: the accept-and-close itself is fast (one accepted dual fix
+        # is enough), but it shares this tick with the node's *first-ever* logger call (the flat-
+        # grade fallback WARN below), and rclpy/rcl's lazy logging init on that first call can
+        # itself take the better part of a second in this environment -- a fixed 60 * 10ms = 600ms
+        # publish loop can (and did) end and assert before that tick returns. Bound by a generous
+        # deadline and wait on the actual condition instead, the same pattern test_ros.py's
+        # test_reserve_node_uses_organizer_contracts_and_si_outputs uses for its own clock-based
+        # race (waiting on `first_stamp + 160_000_000` rather than a fixed sleep).
+        deadline = time.monotonic() + 10
+        fix = None
+        while not (node.gnss_closed and node.gnss_initialized):
+            assert time.monotonic() < deadline, "GNSS initialization window never closed"
+            assert not failures
             fix = NavSatFix()
             fix.header.stamp = source.get_clock().now().to_msg()
             fix.status.status = 0

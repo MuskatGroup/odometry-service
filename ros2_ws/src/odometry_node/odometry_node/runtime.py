@@ -270,15 +270,25 @@ class ReserveOdometryNode(Node):
         every one of those calls still hit self.get_logger().warning(...), and throttle_duration_sec
         only suppresses the emitted line -- it still formats the message and queries the clock every
         time. _warn_throttled skips that whole path, formatting included, until its window elapses.
+
+        Catches AttributeError alongside KeyError: an unresolvable route is not the only way this
+        lookup can fail to find a route -- self.geometry lacking a `.graph` altogether (organizer
+        audit follow-up, 2026-09-27: a test double built against an older Geometry contract hit
+        exactly this) fails the same way and must degrade to flat grade the same way. Left
+        unguarded, this call is inside the estimator's own advance_to() (via route_grade_provider),
+        so any exception here aborts the *whole tick* before _publish runs -- caught by _guard so
+        the process survives, but with nothing published for that tick and no visible sign short of
+        crash_count, repeating on every subsequent tick as long as the condition holds. That is
+        worse than the flat-grade fallback this method exists to provide.
         """
         if not route_id:
             return 0.0
         try:
             length = self.geometry.graph.length_m(route_id)
-        except KeyError:
+        except (KeyError, AttributeError):
             self._warn_throttled(
                 "unknown_route",
-                lambda: f"route_id {route_id!r} is not in the loaded Pathgraph; using flat grade",
+                lambda: f"route_id {route_id!r} is not resolvable against the loaded geometry; using flat grade",
             )
             return 0.0
         if not (0.0 <= s_m <= length):
