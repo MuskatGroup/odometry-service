@@ -353,3 +353,7 @@ def test_extended_metrics_and_fault_drift(tmp_path):
     assert report["metrics"]["speed_max_abs_mps"] == 1.0
     assert report["metrics"]["mode_fraction"]["DEGRADED"] == 0.5
     assert report["fault_windows"][0]["position_drift_m"] == 0.5
+    # Criterion 2 asks for end-of-run drift relative to distance travelled, not just metres: the
+    # tram covered 1.0 m of truth here and ended up 0.5 m off, i.e. 50%.
+    assert report["metrics"]["distance_traveled_m"] == pytest.approx(1.0)
+    assert report["metrics"]["final_drift_pct_of_distance"] == pytest.approx(50.0)

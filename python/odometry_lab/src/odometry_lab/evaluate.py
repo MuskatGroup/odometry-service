@@ -51,6 +51,18 @@ def evaluate(estimates_path, truth_path=None, output=None, faults_path=None):
 
     speed_errors = [frame["v_mps"] - reference["v_mps"] for frame, reference in pairs]
     position_errors = [frame["s_m"] - reference["s_m"] for frame, reference in pairs]
+    # Criterion 2 ("Точность оценки положения") asks for accumulated drift at the end of the run
+    # *relative to distance travelled* (%), not just an absolute metre figure: 5 m of error after
+    # 50 m travelled is a very different result from 5 m after 5 km. Distance is the reference's
+    # own along-track span over the matched window (truth, not our estimate, so a systematic scale
+    # error in our output can't shrink its own denominator).
+    distance_traveled_m = abs(pairs[-1][1]["s_m"] - pairs[0][1]["s_m"]) if pairs else None
+    final_position_error_m = pairs[-1][0]["s_m"] - pairs[-1][1]["s_m"] if pairs else None
+    final_drift_pct_of_distance = (
+        abs(final_position_error_m) / distance_traveled_m * 100
+        if final_position_error_m is not None and distance_traveled_m
+        else None
+    )
     durations = [(int(b["stamp_ns"]) - int(a["stamp_ns"])) / 1e9 for a, b in zip(frames, frames[1:])]
     duration = sum(durations)
     available = sum(dt for a, dt in zip(frames, durations) if a["valid"])
@@ -106,7 +118,9 @@ def evaluate(estimates_path, truth_path=None, output=None, faults_path=None):
             "position_rmse_m": error_metric("s_m", 2),
             "position_p95_abs_m": _percentile([abs(value) for value in position_errors], 0.95),
             "position_max_abs_m": max(map(abs, position_errors), default=None),
-            "final_position_error_m": pairs[-1][0]["s_m"] - pairs[-1][1]["s_m"] if pairs else None,
+            "final_position_error_m": final_position_error_m,
+            "distance_traveled_m": distance_traveled_m,
+            "final_drift_pct_of_distance": final_drift_pct_of_distance,
             "valid_fraction": available / duration if duration else None,
             "sample_count": len(frames),
             "truth_matched_count": len(pairs),
