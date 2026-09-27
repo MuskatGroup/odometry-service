@@ -138,10 +138,15 @@ def test_common_freeze_remains_rejected_after_controller_returns_to_neutral():
     assert not estimator.frozen_ids
 
 
-def test_common_slip_remains_rejected_on_coast_until_measurements_agree():
+@pytest.mark.parametrize("speed,fault_speed,command,health", [
+    (5.0, 9.0, 0.5, "positive_slip"),
+    (10.0, 5.0, -0.5, "braking_slide"),
+])
+def test_common_slip_remains_rejected_on_coast_until_measurements_agree(
+    speed, fault_speed, command, health,
+):
     # A zero-acceleration drive isolates recovery logic from model error. The fault
     # values keep changing, so freeze detection cannot protect this scenario.
-    speed, fault_speed, command, health = 5.0, 9.0, 0.5, "positive_slip"
     config = ModelConfig(
         c1=0.0, reacquire_s=1.0, max_model_only_s=1.0,
         traction_map=DriveMap((0.5,), (0.0,), ((0.0,),)),

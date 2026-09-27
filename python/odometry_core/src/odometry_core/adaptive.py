@@ -252,6 +252,7 @@ class AdaptiveOdometryEstimator:
         self.z_prev = self.z_time = None
         self.frozen_ids: set[str] = set()
         self.slip_latches: dict[str, WheelHealthState] = {}
+        self.reacquiring_ids: set[str] = set()
         self.wheel_health: dict[str, WheelHealthState] = {}
         self.health_recovery: dict[str, int] = {}
         self.previous_wheels: dict[str, WheelSample] = {}
@@ -517,6 +518,7 @@ class AdaptiveOdometryEstimator:
             return self._set_health(sample.wheel_id, WheelHealthState.UNKNOWN)
         if self._is_frozen(sample):
             self.slip_latches.pop(sample.wheel_id, None)
+            self.reacquiring_ids.add(sample.wheel_id)
             self.frozen_ids.add(sample.wheel_id)
             self.last_frozen = sample.stamp_ns
             return self._set_health(sample.wheel_id, WheelHealthState.FROZEN)
@@ -524,6 +526,7 @@ class AdaptiveOdometryEstimator:
         self.previous_wheels[sample.wheel_id] = sample
         if previous is not None and (sample.stamp_ns - previous.stamp_ns) / 1e9 > self.config.wheel_timeout_s:
             self.slip_latches.pop(sample.wheel_id, None)
+            self.reacquiring_ids.add(sample.wheel_id)
         if previous is not None and sample.stamp_ns > previous.stamp_ns:
             derivative = (sample.speed_mps - previous.speed_mps) / (
                 (sample.stamp_ns - previous.stamp_ns) / 1e9
@@ -536,25 +539,31 @@ class AdaptiveOdometryEstimator:
         innovation = sample.speed_mps - self.x[1]
         gate = self.config.gate_sigma_cap + 3 * math.sqrt(self.config.wheel_variance_floor)
         latched_health = self.slip_latches.get(sample.wheel_id)
-        # A large innovation after a long outage can be model drift. Only latch
-        # faults detected while recent accepted wheels still constrain the model.
-        fresh_model = (sample.stamp_ns - self.last_accept) / 1e9 <= self.config.wheel_timeout_s
+        # After a freeze or dropout the model may have drifted. Restore normal
+        # channel health before latching a new slip episode against that model.
+        can_latch = sample.wheel_id not in self.reacquiring_ids
         # Releasing the controller does not establish adhesion. Keep an already
-        # detected positive slip excluded while its signed innovation remains large;
+        # detected slip/slide excluded while its signed innovation remains large;
         # otherwise reacquisition can pull the model to two equally faulty wheels.
         if innovation > gate and (
             (self.control or 0.0) > self.config.u_dead
             or latched_health == WheelHealthState.POSITIVE_SLIP
         ):
-            if fresh_model:
+            if can_latch:
                 self.slip_latches[sample.wheel_id] = WheelHealthState.POSITIVE_SLIP
             return self._set_health(sample.wheel_id, WheelHealthState.POSITIVE_SLIP)
-        if innovation < -gate and (self.control or 0.0) < -self.config.u_dead:
+        if innovation < -gate and (
+            (self.control or 0.0) < -self.config.u_dead
+            or latched_health == WheelHealthState.BRAKING_SLIDE
+        ):
+            if can_latch:
+                self.slip_latches[sample.wheel_id] = WheelHealthState.BRAKING_SLIDE
             return self._set_health(sample.wheel_id, WheelHealthState.BRAKING_SLIDE)
         self.frozen_ids.discard(sample.wheel_id)
         state = self._set_health(sample.wheel_id, WheelHealthState.NORMAL)
         if state == WheelHealthState.NORMAL:
             self.slip_latches.pop(sample.wheel_id, None)
+            self.reacquiring_ids.discard(sample.wheel_id)
         return state
 
     def _correction_update(self, event):
@@ -633,6 +642,8 @@ class AdaptiveOdometryEstimator:
                 continue
             self.channels[event.wheel_id] = event
             if not event.valid:
+                self.slip_latches.pop(event.wheel_id, None)
+                self.reacquiring_ids.add(event.wheel_id)
                 self._set_health(event.wheel_id, WheelHealthState.UNKNOWN)
                 self.rejected += 1
             else:
