@@ -65,7 +65,7 @@ updates проходят route, baseline, cross-track и EKF gates.
 | `pathgraph_directory` | пусто | каталог JSON Pathgraph |
 | `model_config` | пусто | YAML либо каталог профилей |
 | `publish_rate_hz` | `50.0` | частота публикации, минимум 10 Гц |
-| `processing_delay_ms` | `20.0` | задержка упорядочивания событий |
+| `processing_delay_ms` | `120.0` | fixed-lag окно приёма запоздавших timestamp; публикация прогнозируется на текущее время |
 | `max_model_only_s` | `10.0` | валидный горизонт без колёс |
 | `gnss_sync_tolerance_ms` | `200.0` | допуск синхронизации антенн |
 | `gnss_cross_track_gate_m` | `8.0` | максимальное отклонение от пути |
@@ -95,6 +95,12 @@ ros2 bag play /workspace/dataset/data/<bag-id> --clock
 Нода напрямую слушает выданные `/vehicle/*` и при разрешённой политике `/sensing/gnss/*`.
 Для bag time запускать ноду с `use_sim_time:=true`.
 
+`Header.stamp` колёс в предоставленных bag отстаёт от времени записи примерно на
+35–100 мс. Поэтому основной EKF фиксирует историю только до
+`now-processing_delay_ms`, а disposable-копия прогнозируется до `now` и публикуется с
+текущим stamp. Окно не добавляется целиком к задержке `/result/*`. Сообщения старше
+watermark всё равно отвергаются как `OUT_OF_ORDER` и учитываются в diagnostics.
+
 ## Проверка результата
 
 ```bash
@@ -103,6 +109,11 @@ ros2 topic hz /result/position
 ros2 topic echo /odometry/estimate --once
 ros2 topic echo /odometry/diagnostics
 ```
+
+В diagnostics проверить `input_lateness_p95_ms`, `wheel_lateness_p99_ms`,
+`late_input_count`, `too_late_input_count`, `reorder_window_ms` и
+`filter_commit_lag_ms`. Для штатного bag `too_late_input_count` должен оставаться около
+нуля; рост означает, что окно меньше фактической транспортной задержки.
 
 `/result/velocity` публикуется при наличии численной оценки скорости. Валидный
 `/result/position` появляется только при известном route, доступном Pathgraph и пригодной

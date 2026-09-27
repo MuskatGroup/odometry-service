@@ -30,6 +30,7 @@ from sensor_msgs.msg import NavSatFix
 from tram_vehicle_msgs.msg import DriverControllerCommand, VelocitySensor
 
 from .conversion import estimate_message, ns, set_stamp
+from .fixed_lag import advance_fixed_lag
 from .geometry_adapter import GeometryAdapter
 from .organizer import controller_position_to_u, percentile, wheel_kmh_to_mps
 
@@ -53,7 +54,7 @@ class ReserveOdometryNode(Node):
             "model_config": "",
             "allow_unidentified_model": False,
             "publish_rate_hz": 50.0,
-            "processing_delay_ms": 20.0,
+            "processing_delay_ms": 120.0,
             "max_model_only_s": 10.0,
             "gnss_sync_tolerance_ms": 200.0,
             "gnss_cross_track_gate_m": 8.0,
@@ -115,6 +116,15 @@ class ReserveOdometryNode(Node):
         self.initial_position_accepts = 0
         self.gnss_reasons = set()
         self.latency_ms = deque(maxlen=4096)
+        self.input_lateness_ms = deque(maxlen=4096)
+        self.wheel_lateness_ms = deque(maxlen=4096)
+        self.late_input_count = 0
+        self.too_late_input_count = 0
+        reorder_ms = float(self.get_parameter("processing_delay_ms").value)
+        if not math.isfinite(reorder_ms) or reorder_ms < 0:
+            raise ValueError("processing_delay_ms must be finite and non-negative")
+        self.reorder_window_ns = round(reorder_ms * 1e6)
+        self.filter_commit_stamp = None
 
         self.estimate_publisher = self.create_publisher(LongitudinalEstimate, "/odometry/estimate", 10)
         self.velocity_publisher = self.create_publisher(VelocitySensor, "/result/velocity", 10)
@@ -163,8 +173,24 @@ class ReserveOdometryNode(Node):
             )
             self.estimator.route_id = self.route_id
 
+    def _record_input_timing(self, stamp, wheel=False):
+        now = self.get_clock().now().nanoseconds
+        if now >= stamp:
+            lateness_ms = (now - stamp) / 1e6
+            self.input_lateness_ms.append(lateness_ms)
+            if wheel:
+                self.wheel_lateness_ms.append(lateness_ms)
+            if now - stamp > self.reorder_window_ns:
+                self.late_input_count += 1
+        if self.estimator.t is not None and (
+            stamp < self.estimator.t
+            or (self.estimator.closed_time is not None and stamp <= self.estimator.closed_time)
+        ):
+            self.too_late_input_count += 1
+
     def _control(self, msg):
         stamp = ns(msg.header.stamp)
+        self._record_input_timing(stamp)
         self._ensure_initialized(stamp)
         try:
             value = controller_position_to_u(msg.position)
@@ -175,6 +201,7 @@ class ReserveOdometryNode(Node):
 
     def _wheel(self, msg, wheel_id):
         stamp = ns(msg.header.stamp)
+        self._record_input_timing(stamp, wheel=True)
         self._ensure_initialized(stamp)
         try:
             value = wheel_kmh_to_mps(msg.velocity)
@@ -203,6 +230,7 @@ class ReserveOdometryNode(Node):
             )
 
     def _fix(self, msg, receiver):
+        self._record_input_timing(ns(msg.header.stamp))
         values = (float(msg.latitude), float(msg.longitude), float(msg.altitude))
         if msg.status.status < 0 or not all(math.isfinite(value) for value in values):
             self.prefilter_rejected_position += 1
@@ -294,6 +322,8 @@ class ReserveOdometryNode(Node):
 
     def _velocity_correction(self, msg, receiver):
         del receiver
+        stamp = ns(msg.header.stamp)
+        self._record_input_timing(stamp)
         if not self.route_id or self.estimator.t is None:
             self.prefilter_rejected_velocity += 1
             return
@@ -306,7 +336,6 @@ class ReserveOdometryNode(Node):
             self.prefilter_rejected_velocity += 1
             self.gnss_reasons.add("GNSS_VELOCITY_INVALID")
             return
-        stamp = ns(msg.header.stamp)
         self.estimator.ingest_velocity_correction(
             LongitudinalVelocityCorrection(
                 stamp,
@@ -322,18 +351,19 @@ class ReserveOdometryNode(Node):
         if self.estimator.t is None:
             return
         stamp = self.get_clock().now().nanoseconds
-        stamp = max(0, stamp - round(self.get_parameter("processing_delay_ms").value * 1e6))
         if stamp < self.estimator.t:
             return
         self._flush_old_fixes(stamp)
         if stamp == self.last_publish_stamp:
             return
-        self._publish(stamp)
-
-    def _publish(self, stamp):
         began = time.perf_counter()
-        result = self.estimator.advance_to(stamp)
+        result, self.filter_commit_stamp = advance_fixed_lag(
+            self.estimator, stamp, self.reorder_window_ns
+        )
         compute_ms = (time.perf_counter() - began) * 1000.0
+        self._publish(result, stamp, compute_ms)
+
+    def _publish(self, result, stamp, compute_ms):
         result.accepted_gnss_position_count += self.initial_position_accepts
         result.rejected_gnss_position_count += self.prefilter_rejected_position
         result.rejected_gnss_velocity_count += self.prefilter_rejected_velocity
@@ -419,6 +449,13 @@ class ReserveOdometryNode(Node):
         rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
         latency_p95 = percentile(self.latency_ms, 0.95)
         latency_p99 = percentile(self.latency_ms, 0.99)
+        input_p95 = percentile(self.input_lateness_ms, 0.95)
+        input_p99 = percentile(self.input_lateness_ms, 0.99)
+        wheel_p95 = percentile(self.wheel_lateness_ms, 0.95)
+        wheel_p99 = percentile(self.wheel_lateness_ms, 0.99)
+        commit_lag_ms = (
+            None if self.filter_commit_stamp is None else (stamp - self.filter_commit_stamp) / 1e6
+        )
         status.values = [
             KeyValue(key="reasons", value=",".join(result.reason_codes)),
             KeyValue(key="compute_ms", value=f"{compute_ms:.6f}"),
@@ -426,6 +463,15 @@ class ReserveOdometryNode(Node):
             KeyValue(key="gnss_policy", value=self.gnss_policy),
             KeyValue(key="has_map_pose", value=str(has_map_pose).lower()),
             KeyValue(key="queue_depth", value=str(len(self.estimator.queue))),
+            KeyValue(key="reorder_window_ms", value=f"{self.reorder_window_ns / 1e6:.3f}"),
+            KeyValue(key="filter_commit_lag_ms", value=f"{commit_lag_ms or 0.0:.3f}"),
+            KeyValue(key="input_lateness_p95_ms", value=f"{input_p95 or 0.0:.3f}"),
+            KeyValue(key="input_lateness_p99_ms", value=f"{input_p99 or 0.0:.3f}"),
+            KeyValue(key="input_lateness_max_ms", value=f"{max(self.input_lateness_ms, default=0.0):.3f}"),
+            KeyValue(key="wheel_lateness_p95_ms", value=f"{wheel_p95 or 0.0:.3f}"),
+            KeyValue(key="wheel_lateness_p99_ms", value=f"{wheel_p99 or 0.0:.3f}"),
+            KeyValue(key="late_input_count", value=str(self.late_input_count)),
+            KeyValue(key="too_late_input_count", value=str(self.too_late_input_count)),
             KeyValue(key="input_to_publication_ms", value=f"{input_to_publication_ms:.6f}"),
             KeyValue(key="latency_samples", value=str(len(self.latency_ms))),
             KeyValue(key="latency_p95_ms", value=f"{latency_p95:.6f}"),

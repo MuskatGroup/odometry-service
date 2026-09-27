@@ -138,7 +138,7 @@ def test_reserve_node_uses_organizer_contracts_and_si_outputs():
         parameter_overrides=[
             Parameter("route_id", value="route-a"),
             Parameter("initial_v_mps", value=10.0),
-            Parameter("processing_delay_ms", value=0.0),
+            Parameter("processing_delay_ms", value=120.0),
         ],
     )
     executor = SingleThreadedExecutor()
@@ -171,6 +171,21 @@ def test_reserve_node_uses_organizer_contracts_and_si_outputs():
         assert velocities[-1].velocity == pytest.approx(10.0, abs=0.2)
         assert positions[-1].header.frame_id == "map"
         assert positions[-1].child_frame_id == "base_link"
+
+        # Organizer bags deliver wheel headers tens of milliseconds behind /clock. The
+        # fixed-lag commit must accept these samples while publishing a current-time preview.
+        delayed = source.get_clock().now().nanoseconds - 80_000_000
+        wheel.header.stamp.sec, wheel.header.stamp.nanosec = divmod(delayed, 1_000_000_000)
+        front.publish(wheel)
+        rear.publish(wheel)
+        accepted_before = node.estimator.accepted
+        deadline = time.monotonic() + 2
+        while node.estimator.accepted <= accepted_before and time.monotonic() < deadline:
+            executor.spin_once(timeout_sec=0.02)
+        assert node.estimator.rejected == 0
+        # A front/rear pair at one timestamp is fused as one median wheel update.
+        assert node.estimator.accepted >= accepted_before + 1
+        assert node.too_late_input_count == 0
     finally:
         executor.shutdown()
         source.destroy_node()

@@ -190,3 +190,19 @@ python -m odometry_lab.cli real-benchmark --output artifacts/real-test --subset 
 - отсутствие GNSS leakage в режиме `never`;
 - корректные `map`, `base_link`, м/с и continuous MGRS на `/result/*`;
 - рост covariance и переход в `INVALID` после превышения model-only horizon.
+- `too_late_input_count≈0` на полном bag и отсутствие массового `OUT_OF_ORDER` при
+  фактическом отставании колесных `Header.stamp`;
+
+### Проверка event-time окна
+
+Offline-моделирование 50-Гц watermark по `recorded_ns` и `Header.stamp` показывает долю
+колёс, оказавшихся старше уже закрытого времени фильтра:
+
+| Bag | Старый прямой advance, 20 мс | Fixed-lag, 120 мс |
+|---|---:|---:|
+| checker `30618_88aea4d9` | 56,23% | 0,30% |
+| `30618_0a83c933` | 92,58% | 0,27% |
+| `30618_af7496f0` | 74,10% | 2,52% |
+
+Оставшиеся сообщения имеют аномальное отставание до нескольких секунд и намеренно не
+переписывают закрытую историю. Их число должно быть видно в `too_late_input_count`.

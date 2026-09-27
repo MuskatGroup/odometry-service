@@ -24,12 +24,14 @@
 ## Что готово сейчас
 
 - production-нода напрямую принимает три обязательных топика организаторов;
+- fixed-lag watermark принимает запаздывающие колесные timestamp, а наружу публикуется
+  current-time prediction;
 - математическое ядро не зависит от ROS и использует идентифицированный YAML-профиль;
 - поддержаны запуск без GNSS, начальная привязка и периодические GNSS-коррекции;
 - положение переводится из along-track `s` в continuous MGRS по Pathgraph;
 - публикуются скорость, положение, ускорение, covariance, wheel health и диагностика;
 - подготовлены replay, Failure Lab, отчёты, API и интерфейс демонстрации;
-- Python-проверка на текущем коммите: `85 passed`, `6 skipped`; frontend production build проходит.
+- Python-проверка на текущем коммите: `89 passed`, `6 skipped`; frontend production build проходит.
 
 Пропущенные тесты — два ROS/Humble, два opt-in API и два теста, которым нужен
 `dataset/derived`. Это не считается подтверждением полного production-прогона.
