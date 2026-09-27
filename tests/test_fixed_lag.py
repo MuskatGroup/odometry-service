@@ -96,6 +96,21 @@ def test_route_grade_provider_is_not_copied_with_its_owner_lock():
     assert current.v_mps < 10.0
 
 
+def test_slip_latch_in_preview_does_not_change_committed_history():
+    estimator = AdaptiveOdometryEstimator(ModelConfig(c1=0.0))
+    estimator.initialize(InitialState(0, 0.0, 5.0))
+    estimator.ingest_control(ControlSample(0, 0, 0.5))
+    estimator.ingest_wheel(WheelSample(0, 0, "front", 5.0))
+    estimator.ingest_wheel(WheelSample(100_000_000, 1, "front", 9.0))
+    estimator.ingest_wheel(WheelSample(200_000_000, 2, "front", 9.01))
+    preview, commit = fixed_lag.advance_fixed_lag(estimator, 250_000_000, 200_000_000)
+    assert commit == 50_000_000
+    assert preview.wheel_health["front"] == "positive_slip"
+    assert estimator.slip_latches == {}
+    fixed_lag.advance_fixed_lag(estimator, 450_000_000, 200_000_000)
+    assert "front" in estimator.slip_latches
+
+
 @pytest.mark.parametrize("now, lag", [(-1, 0), (0, -1)])
 def test_invalid_fixed_lag_arguments(now, lag):
     estimator = AdaptiveOdometryEstimator()
