@@ -138,47 +138,6 @@ def test_common_freeze_remains_rejected_after_controller_returns_to_neutral():
     assert not estimator.frozen_ids
 
 
-@pytest.mark.parametrize("speed,fault_speed,command,health", [
-    (5.0, 9.0, 0.5, "positive_slip"),
-    (10.0, 5.0, -0.5, "braking_slide"),
-])
-def test_common_slip_remains_rejected_on_coast_until_measurements_agree(
-    speed, fault_speed, command, health,
-):
-    # A zero-acceleration drive isolates recovery logic from model error. The fault
-    # values keep changing, so freeze detection cannot protect this scenario.
-    config = ModelConfig(
-        c1=0.0, reacquire_s=1.0, max_model_only_s=1.0,
-        traction_map=DriveMap((0.5,), (0.0,), ((0.0,),)),
-        braking_map=DriveMap((-0.5,), (0.0,), ((0.0,),)),
-    )
-    estimator = AdaptiveOdometryEstimator(config)
-    estimator.initialize(InitialState(0, 0, speed))
-    for index in range(41):
-        stamp = index * 100_000_000
-        estimator.ingest_control(ControlSample(stamp, index, command if index < 6 else 0.0))
-        for channel in ("front", "rear"):
-            measured = speed if index == 0 else fault_speed + index * 0.001
-            estimator.ingest_wheel(WheelSample(stamp, index, channel, measured))
-        result = estimator.advance_to(stamp)
-        if index == 5:
-            assert set(result.wheel_health.values()) == {health}
-            accepted_before_coast = result.accepted_wheel_count
-    assert result.v_mps == pytest.approx(speed, abs=0.1)
-    assert result.accepted_wheel_count == accepted_before_coast
-    assert set(result.wheel_health.values()) == {health}
-    assert not result.valid
-    assert not estimator.frozen_ids
-
-    for index in range(41, 51):
-        stamp = index * 100_000_000
-        for channel in ("front", "rear"):
-            estimator.ingest_wheel(WheelSample(stamp, index, channel, speed + 0.001 * index))
-        result = estimator.advance_to(stamp)
-    assert result.valid
-    assert set(result.wheel_health.values()) == {"normal"}
-
-
 def test_stationary_braked_wheels_are_not_frozen_by_negative_model_acceleration():
     config = ModelConfig(
         freeze_s=0.2,

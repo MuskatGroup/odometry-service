@@ -1,0 +1,81 @@
+{
+  "bag": "/check-bags/30618_88aea4d9",
+  "full_bag_completed": false,
+  "playback_reached_end": false,
+  "rate": 1.0,
+  "start_offset_s": 230.0,
+  "gnss_policy": "disabled",
+  "route_id": "shchukinskaya_to_tallinskaya",
+  "wall_seconds": 125.16110503099992,
+  "counts": {
+    "velocity": 5804,
+    "estimate": 5804,
+    "valid": 5804,
+    "position": 5804
+  },
+  "modes": {
+    "FUSED": 5745,
+    "MODEL_ONLY": 40,
+    "DEGRADED": 19
+  },
+  "position_frames": {
+    "map": 5804
+  },
+  "rates": {
+    "velocity": {
+      "bag_time_hz": 48.1496863196729,
+      "wall_gap_p99_ms": 40.400616999932026,
+      "wall_gap_max_ms": 81.02406399996198
+    },
+    "position": {
+      "bag_time_hz": 48.1496863196729,
+      "wall_gap_p99_ms": 41.84274900001128,
+      "wall_gap_max_ms": 81.04669800002284
+    }
+  },
+  "diagnostic_maxima": {
+    "latency_max_ms": 88.083606,
+    "latency_p99_ms": 40.98412056,
+    "rss_mb": 67.844,
+    "compute_ms": 30.242122,
+    "cpu_cores": 1.780828,
+    "crash_count": 0
+  },
+  "last_diagnostics": {
+    "reasons": "UNCERTAINTY_UNCALIBRATED",
+    "compute_ms": "3.702844",
+    "route_id": "shchukinskaya_to_tallinskaya",
+    "gnss_policy": "disabled",
+    "has_map_pose": "true",
+    "queue_depth": "10",
+    "reorder_window_ms": "300.000",
+    "filter_commit_lag_ms": "300.000",
+    "input_lateness_p95_ms": "40.300",
+    "input_lateness_p99_ms": "55.387",
+    "input_lateness_max_ms": "113.554",
+    "wheel_lateness_p95_ms": "45.828",
+    "wheel_lateness_p99_ms": "60.196",
+    "late_input_count": "0",
+    "too_late_input_count": "0",
+    "crash_count": "0",
+    "position_published_count": "5804",
+    "position_withheld_horizon_count": "0",
+    "latency_definition": "wheel/control callback entry to result publication; steady clock",
+    "input_to_publication_ms": "5.858869",
+    "latency_samples": "4096",
+    "latency_p95_ms": "23.1640075",
+    "latency_p99_ms": "37.71773940000001",
+    "latency_max_ms": "88.083606",
+    "cpu_cores": "1.059397",
+    "rss_mb": "67.844"
+  },
+  "metrics": {
+    "reference": "/localization/kinematic_state; nearest header within 50 ms; all estimates, including invalid",
+    "speed_pairs": 5804,
+    "speed_rmse_mps": 0.03539398022149651,
+    "speed_bias_mps": 0.00019985227631677828,
+    "map_position_pairs": 5804,
+    "map_position_rmse_m": 0.1693694831885761
+  },
+  "latency_scope": "Node callback entry through publication; excludes publisher/network/DDS pre-callback time"
+}
