@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Estimate frame v0.2",
+  "title": "Estimate frame v0.3 (fields unchanged since 0.2; schema_version is 0.3 for real-bag runs)",
   "type": "object",
   "required": [
     "run_id",

@@ -25,7 +25,7 @@ app.Use(async (context, next) =>
 app.UseCors();
 app.UseDefaultFiles();
 app.UseStaticFiles();
-app.MapGet("/api/health", () => Results.Ok(new { status = "ready", schema_version = "0.2" }));
+app.MapGet("/api/health", () => Results.Ok(new { status = "ready", schema_version = "0.3" }));
 app.MapPost("/api/runs", (JsonElement body, RunStore store) =>
 {
     var id = Validation.RunId(body.GetProperty("run_id").GetString());
