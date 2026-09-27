@@ -546,6 +546,14 @@ class AdaptiveOdometryEstimator:
     def _process_group(self, stamp, events):
         self._predict_to(stamp)
         candidates = []
+        # GNSS corrections are collected, not applied inline: events of one timestamp already
+        # arrive sorted control -> wheels -> velocity correction -> position correction
+        # (odometry_core.types.event_key), but wheel fusion below only runs once every candidate
+        # in the group is known, i.e. after this loop. Applying a correction the moment it is seen
+        # would run it *before* that deferred wheel update, silently reordering
+        # "wheels then GNSS" into "GNSS then wheels" for any group that has both (organizer audit,
+        # 2026-09-27: a diagnostic run confirmed corrections landing ahead of the wheel update).
+        corrections = []
         for event in events:
             if isinstance(event, ControlSample):
                 self.control = event.u if event.valid else None
@@ -553,7 +561,7 @@ class AdaptiveOdometryEstimator:
                 self.last_control = stamp
                 continue
             if isinstance(event, (LongitudinalVelocityCorrection, AlongTrackPositionCorrection)):
-                self._correction_update(event)
+                corrections.append(event)
                 continue
             if event.wheel_id not in self.channels and len(self.channels) >= self.config.max_channels:
                 self.pending_reasons.add("CHANNEL_LIMIT")
@@ -570,31 +578,36 @@ class AdaptiveOdometryEstimator:
                 else:
                     self.rejected += 1
                     self.last_reject = stamp
-        if not candidates or not self.config.use_wheels:
-            return
-        if self.config.robust and self.config.channel_gate and len(candidates) >= 2:
-            variance = self.config.wheel_variance_floor + min(self.P[1][1], self.config.gate_sigma_cap**2)
-            inliers = [
-                item
-                for item in candidates
-                if (item.speed_mps - self.x[1]) ** 2 / variance <= self.config.gate_normal
-            ]
-            if inliers and len(inliers) < len(candidates):
-                rejected_ids = {item.wheel_id for item in candidates if item not in inliers}
-                for wheel_id in rejected_ids:
-                    event = next(item for item in candidates if item.wheel_id == wheel_id)
-                    if event.speed_mps > self.x[1] and (self.control or 0.0) > self.config.u_dead:
-                        self._set_health(wheel_id, WheelHealthState.POSITIVE_SLIP)
-                    elif event.speed_mps < self.x[1] and (self.control or 0.0) < -self.config.u_dead:
-                        self._set_health(wheel_id, WheelHealthState.BRAKING_SLIDE)
-                    else:
-                        self._set_health(wheel_id, WheelHealthState.INCONSISTENT)
-                self.rejected += len(candidates) - len(inliers)
-                self.last_reject = stamp
-                candidates = inliers
-        measurement = median(item.speed_mps for item in candidates)
-        spread = median((item.speed_mps - measurement) ** 2 for item in candidates)
-        self._wheel_update(stamp, measurement, max(self.config.wheel_variance_floor, spread))
+        if candidates and self.config.use_wheels:
+            if self.config.robust and self.config.channel_gate and len(candidates) >= 2:
+                variance = (
+                    self.config.wheel_variance_floor + min(self.P[1][1], self.config.gate_sigma_cap**2)
+                )
+                inliers = [
+                    item
+                    for item in candidates
+                    if (item.speed_mps - self.x[1]) ** 2 / variance <= self.config.gate_normal
+                ]
+                if inliers and len(inliers) < len(candidates):
+                    rejected_ids = {item.wheel_id for item in candidates if item not in inliers}
+                    for wheel_id in rejected_ids:
+                        event = next(item for item in candidates if item.wheel_id == wheel_id)
+                        if event.speed_mps > self.x[1] and (self.control or 0.0) > self.config.u_dead:
+                            self._set_health(wheel_id, WheelHealthState.POSITIVE_SLIP)
+                        elif event.speed_mps < self.x[1] and (self.control or 0.0) < -self.config.u_dead:
+                            self._set_health(wheel_id, WheelHealthState.BRAKING_SLIDE)
+                        else:
+                            self._set_health(wheel_id, WheelHealthState.INCONSISTENT)
+                    self.rejected += len(candidates) - len(inliers)
+                    self.last_reject = stamp
+                    candidates = inliers
+            measurement = median(item.speed_mps for item in candidates)
+            spread = median((item.speed_mps - measurement) ** 2 for item in candidates)
+            self._wheel_update(stamp, measurement, max(self.config.wheel_variance_floor, spread))
+        # Corrections apply last, exactly as documented (wheels -> GNSS velocity -> GNSS position),
+        # regardless of whether this group had any wheel samples at all.
+        for correction in corrections:
+            self._correction_update(correction)
 
     def _wheel_update(self, stamp, measurement, variance):
         c = self.config

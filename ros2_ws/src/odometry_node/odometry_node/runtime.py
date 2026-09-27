@@ -24,6 +24,7 @@ from odometry_core import (
 )
 from odometry_io import load_model_config
 from odometry_msgs.msg import LongitudinalEstimate
+from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
@@ -88,10 +89,21 @@ class ReserveOdometryNode(Node):
             "yaw_variance_rad2": 0.04,
             "run_id": "reserve-odometry",
         }
+        # vehicle_id and route_id are organizer-facing identifiers ("30618", route names) that read
+        # as numbers or look ambiguous to the CLI's YAML-style parameter parser: an unquoted
+        # `-p vehicle_id:=30618` is parsed as an integer override against a string-typed default,
+        # and rclpy's default strict declare_parameter rejects the type mismatch outright, crashing
+        # before any of our code runs (organizer audit, 2026-09-27). dynamic_typing lets the
+        # declaration accept whatever type the caller happened to pass; the value is coerced to
+        # str explicitly right after, so the rest of the node never has to care.
+        string_like = {"vehicle_id", "route_id"}
         for name, value in defaults.items():
-            self.declare_parameter(name, value)
-        self.vehicle_id = self.get_parameter("vehicle_id").value
-        self.route_id = self.get_parameter("route_id").value or None
+            if name in string_like:
+                self.declare_parameter(name, value, descriptor=ParameterDescriptor(dynamic_typing=True))
+            else:
+                self.declare_parameter(name, value)
+        self.vehicle_id = str(self.get_parameter("vehicle_id").value)
+        self.route_id = str(self.get_parameter("route_id").value) or None
         self.s0 = float(self.get_parameter("s0").value)
         self.gnss_policy = self.get_parameter("gnss_policy").value
         if self.gnss_policy not in GNSS_POLICIES:
@@ -147,7 +159,10 @@ class ReserveOdometryNode(Node):
         self.wheel_lateness_ms = deque(maxlen=4096)
         self.late_input_count = 0
         self.too_late_input_count = 0
+        self.last_receipt_monotonic_ns = None
         self.crash_count = 0
+        self.position_published_count = 0
+        self.position_withheld_horizon_count = 0
         reorder_ms = float(self.get_parameter("processing_delay_ms").value)
         if not math.isfinite(reorder_ms) or reorder_ms < 0:
             raise ValueError("processing_delay_ms must be finite and non-negative")
@@ -244,6 +259,10 @@ class ReserveOdometryNode(Node):
             self.estimator.route_id = self.route_id
 
     def _record_input_timing(self, stamp, wheel=False):
+        # Wall-clock receipt time on a monotonic clock, independent of ROS/sim time: this is what
+        # "time since we last actually received something" means to _publish's latency metric
+        # below, and it must not be the (possibly accelerated or replayed) event timestamp itself.
+        self.last_receipt_monotonic_ns = time.monotonic_ns()
         now = self.get_clock().now().nanoseconds
         if now >= stamp:
             lateness_ms = (now - stamp) / 1e6
@@ -485,10 +504,24 @@ class ReserveOdometryNode(Node):
             velocity.header.frame_id = "base_link"
             velocity.velocity = result.v_mps
             self.velocity_publisher.publish(velocity)
-        # Position only needs a known route and a finite s (map_pose implies both); it must not be
-        # withheld just because the *velocity* side is degraded (wheel staleness, model-only, ...).
+        # Publish policy (organizer audit, 2026-09-27, section "Семантика недействительной
+        # позиции"): nav_msgs/Odometry carries no validity flag of its own and the checker scores
+        # every received sample as a normal estimate, but it does not penalize a sample we never
+        # send at all -- so "publish something" is only the right call while that something is
+        # still likely to be closer to the truth than silence. Position only needs a known route
+        # and a finite s (map_pose implies both) and must not be withheld just because the
+        # *velocity* side is merely degraded (wheel staleness, ordinary short model-only coasting,
+        # ...): those still leave decent position estimates. The one case it must be withheld is
+        # MODEL_ONLY_HORIZON: once we have been extrapolating with no fresh measurement at all for
+        # longer than max_model_only_s, further open-loop prediction is no longer a position
+        # estimate worth grading, and every extra published sample only drags the RMSE down for a
+        # true one that we could have left unmatched instead.
         if map_pose is not None and result.covariance_4x4 is not None:
-            self.position_publisher.publish(self._odometry(result, map_pose, stamp))
+            if "MODEL_ONLY_HORIZON" not in result.reason_codes:
+                self.position_publisher.publish(self._odometry(result, map_pose, stamp))
+                self.position_published_count += 1
+            else:
+                self.position_withheld_horizon_count += 1
         self._publish_diagnostics(result, compute_ms, stamp, map_pose is not None)
         self.last_publish_stamp = stamp
 
@@ -528,8 +561,19 @@ class ReserveOdometryNode(Node):
         if result.mode != "FUSED" and result.valid:
             status.level = DiagnosticStatus.WARN
         status.message = result.mode
-        input_to_publication_ms = max(0.0, (self.get_clock().now().nanoseconds - stamp) / 1e6)
-        self.latency_ms.append(input_to_publication_ms)
+        # Previously "now (ROS/sim clock) - stamp", where stamp is the *tick's own* start time
+        # captured microseconds earlier in the same call: that only ever measures this tick's own
+        # compute time (already reported separately as compute_ms) and is ~0 on any healthy run,
+        # not a real receipt-to-publication latency (organizer audit, 2026-09-27). This is instead
+        # wall-clock time, on a monotonic clock immune to sim-time jumps, since the last input of
+        # any kind was actually received.
+        input_to_publication_ms = (
+            None
+            if self.last_receipt_monotonic_ns is None
+            else max(0.0, (time.monotonic_ns() - self.last_receipt_monotonic_ns) / 1e6)
+        )
+        if input_to_publication_ms is not None:
+            self.latency_ms.append(input_to_publication_ms)
         rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
         latency_p95 = percentile(self.latency_ms, 0.95)
         latency_p99 = percentile(self.latency_ms, 0.99)
@@ -557,7 +601,11 @@ class ReserveOdometryNode(Node):
             KeyValue(key="late_input_count", value=str(self.late_input_count)),
             KeyValue(key="too_late_input_count", value=str(self.too_late_input_count)),
             KeyValue(key="crash_count", value=str(self.crash_count)),
-            KeyValue(key="input_to_publication_ms", value=f"{input_to_publication_ms:.6f}"),
+            KeyValue(key="position_published_count", value=str(self.position_published_count)),
+            KeyValue(
+                key="position_withheld_horizon_count", value=str(self.position_withheld_horizon_count)
+            ),
+            KeyValue(key="input_to_publication_ms", value=f"{input_to_publication_ms or 0.0:.6f}"),
             KeyValue(key="latency_samples", value=str(len(self.latency_ms))),
             KeyValue(key="latency_p95_ms", value=f"{latency_p95:.6f}"),
             KeyValue(key="latency_p99_ms", value=f"{latency_p99:.6f}"),
@@ -581,6 +629,12 @@ def main():
     executor.add_node(node)
     try:
         executor.spin()
+    except KeyboardInterrupt:
+        # A normal Ctrl+C/SIGINT stop: KeyboardInterrupt is a BaseException, so it does not match
+        # `except Exception` below and would otherwise propagate all the way out of main() as an
+        # unhandled exception — a clean stop then still exited non-zero (organizer audit,
+        # 2026-09-27).
+        node.get_logger().info("reserve_odometry_node received Ctrl+C, shutting down")
     except Exception:
         import traceback
 
@@ -589,4 +643,7 @@ def main():
     finally:
         executor.shutdown()
         node.destroy_node()
-        rclpy.shutdown()
+        # rclpy may already be shut down by the executor/context on its own during an interrupted
+        # spin; calling it again logs "rcl_shutdown already called" for no benefit.
+        if rclpy.ok():
+            rclpy.shutdown()

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from odometry_io import load_profile
+from odometry_io import ModelProfileError, load_profile
 from odometry_lab.evaluate import evaluate
 from odometry_lab.runner import run
 from odometry_lab.scenario import generate
@@ -202,19 +202,47 @@ def test_summary_keeps_missing_metrics_unavailable():
     assert entry["speed_bias_mps"] is None and entry["recovery_s"] is None
 
 
-def test_model_profile_maps_to_estimator_config():
-    profile = {
-        "longitudinal": {"tau_s": 0.4, "c1_inv_s": 0.02, "c2_inv_m": 0.001},
+def full_model_document(**overrides):
+    document = {
+        "schema_version": 1,
+        "model_version": "test-v1",
+        "vehicle_id": "test",
+        "identified_at_utc": None,
+        "identification_method": "unit_test",
+        "identification_bags": [],
+        "validation_bags": [],
+        "longitudinal": {"tau_s": 0.4, "c1_inv_s": 0.02, "c2_inv_m": 0.001, "disturbance_limit_mps2": 1.5},
+        "traction": {
+            "controller_u": [0.5, 1.0], "speed_mps": [0.0, 10.0],
+            "acceleration_mps2": [[0.5, 0.3], [1.0, 0.6]],
+        },
+        "braking": {
+            "controller_u": [-0.5, -1.0], "speed_mps": [0.0, 10.0],
+            "acceleration_mps2": [[-0.5, -0.3], [-1.0, -0.6]],
+        },
         "noise": {"q_v": 0.05, "q_a": 3.0, "q_d": 0.002, "wheel_variance_floor": 0.05},
         "wheel_health": {
             "gate_normal": 9.0, "gate_reject": 36.0, "max_wheel_accel_mps2": 6.0,
             "freeze_s": 1.0, "reacquire_s": 10.0, "recover_updates": 5,
         },
+        "metrics": {},
     }  # fmt: skip
-    config = config_from_profile(profile)
+    document.update(overrides)
+    return document
+
+
+def test_model_profile_maps_to_estimator_config_with_drive_maps():
+    # The Lab used to parse a hand-picked subset of the same YAML and silently drop the
+    # traction/braking tables and adapt_disturbance, so a Lab-calibrated model was never the one
+    # runtime actually loads (organizer audit, 2026-09-27). config_from_profile is now the same
+    # strict loader runtime uses, so this is a regression test for that mismatch.
+    document = full_model_document()
+    config = config_from_profile(document)
     assert (config.tau_s, config.c1, config.q_a, config.gate_reject) == (0.4, 0.02, 3.0, 36.0)
-    with pytest.raises(KeyError):
-        config_from_profile({**profile, "noise": {}})
+    assert config.traction_map is not None and config.braking_map is not None
+    assert config.adapt_disturbance is True
+    with pytest.raises(ModelProfileError):
+        config_from_profile({**document, "noise": {}})
 
 
 def test_real_bag_case_and_faulted_run_when_dataset_is_available():

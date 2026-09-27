@@ -112,7 +112,6 @@ def test_reserve_node_uses_organizer_contracts_and_si_outputs():
     from rclpy.executors import SingleThreadedExecutor
     from rclpy.node import Node
     from rclpy.parameter import Parameter
-
     from tram_vehicle_msgs.msg import DriverControllerCommand, VelocitySensor
 
     class Pose:
@@ -174,6 +173,18 @@ def test_reserve_node_uses_organizer_contracts_and_si_outputs():
 
         # Organizer bags deliver wheel headers tens of milliseconds behind /clock. The
         # fixed-lag commit must accept these samples while publishing a current-time preview.
+        #
+        # `delayed` must land safely after the estimator's own start time (its init stamp is the
+        # very first message's header, above) or there is no fixed-lag history left to insert it
+        # into and it is correctly rejected as OUT_OF_ORDER -- not a bug, just an earlier-than-init
+        # timestamp. On a slow/loaded CI runner the two publish calls above can land within a few
+        # milliseconds of each other, so "wall clock now minus 80 ms" is not reliably later than
+        # init; wait out a fixed buffer well past the 80 ms offset first so the test's own timing
+        # never decides whether it passes (organizer audit, 2026-09-27: this exact race was
+        # observed failing under load).
+        buffer_deadline = time.monotonic() + 0.3
+        while time.monotonic() < buffer_deadline:
+            executor.spin_once(timeout_sec=0.02)
         delayed = source.get_clock().now().nanoseconds - 80_000_000
         wheel.header.stamp.sec, wheel.header.stamp.nanosec = divmod(delayed, 1_000_000_000)
         front.publish(wheel)

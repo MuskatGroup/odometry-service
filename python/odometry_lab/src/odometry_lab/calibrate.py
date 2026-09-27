@@ -13,6 +13,7 @@ from pathlib import Path
 
 import yaml
 from odometry_core import ModelConfig
+from odometry_io import build_model_config, load_model_config
 
 from . import benchmark
 from .realdata import build_case, run_case
@@ -22,29 +23,16 @@ GRID_Q_A = (0.3, 1.0, 3.0, 10.0)
 GRID_GATE = (9.0, 25.0)  # gate_normal; gate_reject is 4x
 OBJECTIVE_SCENARIOS = ("none", "freeze-1", "slip-1", "dropout-1", "spike-1")
 
-# model YAML section -> ModelConfig field
-NOISE_FIELDS = {"q_v": "q_v", "q_a": "q_a", "q_d": "q_d", "wheel_variance_floor": "wheel_variance_floor"}
-HEALTH_FIELDS = {
-    "gate_normal": "gate_normal",
-    "gate_reject": "gate_reject",
-    "max_wheel_accel_mps2": "max_wheel_accel",
-    "freeze_s": "freeze_s",
-    "reacquire_s": "reacquire_s",
-    "recover_updates": "recover_updates",
-}
-
-
-def config_from_profile(profile: dict) -> ModelConfig:
-    """ModelConfig from a model YAML (noise + wheel health + actuator lag and drag)."""
-    values = {field: profile["noise"][key] for key, field in NOISE_FIELDS.items()}
-    values.update({field: profile["wheel_health"][key] for key, field in HEALTH_FIELDS.items()})
-    longitudinal = profile["longitudinal"]
-    values.update(tau_s=longitudinal["tau_s"], c1=longitudinal["c1_inv_s"], c2=longitudinal["c2_inv_m"])
-    return ModelConfig(**values)
+# Kept as thin aliases over odometry_io's loader (the single source of truth for the model YAML
+# schema): the Lab used to parse a subset of the same document by hand, silently dropping the
+# traction/braking tables and adapt_disturbance, so a calibrated/benchmarked model was never the
+# one runtime actually loads (organizer audit, 2026-09-27).
+config_from_profile = build_model_config
 
 
 def load_profile_config(path: str | Path) -> ModelConfig:
-    return config_from_profile(yaml.safe_load(Path(path).read_text(encoding="utf-8")))
+    config, _document, _path = load_model_config(path, vehicle_id=Path(path).stem)
+    return config
 
 
 def score(config: ModelConfig, cases: list) -> float:

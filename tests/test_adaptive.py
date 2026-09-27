@@ -91,6 +91,53 @@ def test_scalar_velocity_and_position_corrections_are_ordered_and_counted():
     assert result.s_m > 1.0
 
 
+def test_wheel_fusion_runs_before_gnss_corrections_in_the_same_group(monkeypatch):
+    # Regression for organizer audit 2026-09-27: events of one timestamp are queued
+    # control -> wheels -> velocity correction -> position correction (types.event_key), but
+    # _process_group used to apply each correction the moment it was seen while deferring the
+    # wheel fusion to after its whole loop -- so a correction in the same group as a wheel sample
+    # was actually applied *before* that wheel update, the reverse of the documented order.
+    config = ModelConfig(control_timeout_s=None, position_correction_gate=1_000)
+    estimator = AdaptiveOdometryEstimator(config)
+    estimator.initialize(InitialState(0, 0, 1), config)
+    stamp = 1_000_000_000
+    calls = []
+    monkeypatch.setattr(
+        estimator,
+        "_wheel_update",
+        lambda *a, **k: (calls.append("wheel"), AdaptiveOdometryEstimator._wheel_update(estimator, *a, **k))[-1],
+    )
+    monkeypatch.setattr(
+        estimator,
+        "_correction_update",
+        lambda event: (
+            calls.append("velocity" if isinstance(event, LongitudinalVelocityCorrection) else "position"),
+            AdaptiveOdometryEstimator._correction_update(estimator, event),
+        )[-1],
+    )
+    estimator.ingest_control(ControlSample(stamp, 1, 0.0))
+    estimator.ingest_wheel(WheelSample(stamp, 2, "front", 2.0))
+    estimator.ingest_velocity_correction(LongitudinalVelocityCorrection(stamp, 3, 2.0, 0.1, "gnss"))
+    estimator.ingest_position_correction(
+        AlongTrackPositionCorrection(stamp, 4, "route-a", 4.0, 0.1, "gnss")
+    )
+    estimator.advance_to(stamp)
+    assert calls == ["wheel", "velocity", "position"]
+
+
+def test_gnss_correction_alone_in_a_group_still_applies():
+    # The early return that used to skip straight past any pending corrections when a group had
+    # no wheel samples at all (organizer audit, 2026-09-27) would have made this a no-op.
+    config = ModelConfig(control_timeout_s=None, velocity_correction_gate=1_000)
+    estimator = AdaptiveOdometryEstimator(config)
+    estimator.initialize(InitialState(0, 0, 1), config)
+    stamp = 1_000_000_000
+    estimator.ingest_velocity_correction(LongitudinalVelocityCorrection(stamp, 1, 5.0, 0.01, "gnss"))
+    result = estimator.advance_to(stamp)
+    assert result.accepted_gnss_velocity_count == 1
+    assert result.v_mps == pytest.approx(5.0, abs=0.5)
+
+
 def test_wrong_route_and_large_gnss_outlier_are_rejected():
     config = ModelConfig(control_timeout_s=None)
     estimator = AdaptiveOdometryEstimator(config)

@@ -101,9 +101,13 @@ def resolve_model_profile(path, vehicle_id):
     raise FileNotFoundError(f"Neither {requested.name} nor default.yaml exists in {root}")
 
 
-def load_model_config(path, vehicle_id="default"):
-    profile_path = resolve_model_profile(path, vehicle_id)
-    document = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
+def build_model_config(document):
+    """The strict validation shared by every caller: production, Failure Lab and calibration.
+
+    A Lab that loaded these profiles a different way (only noise/wheel_health, skipping the
+    traction/braking tables and ``adapt_disturbance``) would score a model runtime never runs;
+    this is the one place that turns a parsed model YAML document into a ``ModelConfig``.
+    """
     if not isinstance(document, dict):
         raise ModelProfileError("Model profile must be an object")
     unknown = set(document) - TOP_LEVEL
@@ -161,6 +165,12 @@ def load_model_config(path, vehicle_id="default"):
         "adapt_disturbance": True,
     }
     try:
-        return ModelConfig(**values), document, profile_path
+        return ModelConfig(**values)
     except (TypeError, ValueError) as exc:
         raise ModelProfileError(str(exc)) from exc
+
+
+def load_model_config(path, vehicle_id="default"):
+    profile_path = resolve_model_profile(path, vehicle_id)
+    document = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
+    return build_model_config(document), document, profile_path
