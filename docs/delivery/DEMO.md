@@ -104,5 +104,14 @@ docker compose up --build console      # сайт и API на http://localhost:8
 ros2 bag record /result/velocity /result/position /odometry/estimate /odometry/diagnostics
 ```
 
+Альтернатива ручной записи — проверочный скрипт из [RUN.md](RUN.md), сохраняющий CSV и JSON.
+Фактически выполненные прогоны этой итерации — [RUNTIME_VALIDATION.md](RUNTIME_VALIDATION.md).
+Готовый новый отчёт для веб-стенда: `artifacts/runtime-validation/console-clean`; после запуска API:
+
+```bash
+uv run python -m odometry_lab.cli import-report \
+  --directory artifacts/runtime-validation/console-clean --api http://localhost:8080
+```
+
 Демонстрация считается подтверждённой только после такого прогона на предоставленном bag,
 а не после синтетического `docker compose --profile demo`.

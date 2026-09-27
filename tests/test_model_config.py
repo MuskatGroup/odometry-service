@@ -63,3 +63,20 @@ def test_wrong_table_dimensions_are_rejected(tmp_path: Path):
     path.write_text(PROFILE.replace("[[0.2, 0.1], [1.0, 0.5]]", "[[0.2], [1.0]]"), encoding="utf-8")
     with pytest.raises(ModelProfileError, match="dimensions"):
         load_model_config(path)
+
+
+def test_lab_and_runtime_profiles_produce_identical_dynamics(tmp_path):
+    from odometry_core import ControlSample, InitialState
+    from odometry_lab.calibrate import load_profile_config
+    from odometry_lab.runner import run_events
+
+    path = tmp_path / "model.yaml"
+    path.write_text(PROFILE, encoding="utf-8")
+    events = [ControlSample(0, 0, 1.0), ControlSample(2_000_000_000, 1, -1.0)]
+    runtime, _, _ = load_model_config(path)
+    kwargs = dict(initial=InitialState(0, 0.0, 3.0), estimator_name="adaptive-ekf", tail_s=2)
+    a, _ = run_events(events, config=runtime, **kwargs)
+    b, _ = run_events(events, config=load_profile_config(path), **kwargs)
+    assert [(f["s_m"], f["v_mps"]) for f in a] == [(f["s_m"], f["v_mps"]) for f in b]
+    uphill, _ = run_events(events, config=runtime, grade_provider=lambda s: 0.02, **kwargs)
+    assert uphill[-1]["v_mps"] < a[-1]["v_mps"] - 0.5

@@ -174,17 +174,20 @@ def test_reserve_node_uses_organizer_contracts_and_si_outputs():
         # Organizer bags deliver wheel headers tens of milliseconds behind /clock. The
         # fixed-lag commit must accept these samples while publishing a current-time preview.
         #
-        # `delayed` must land safely after the estimator's own start time (its init stamp is the
-        # very first message's header, above) or there is no fixed-lag history left to insert it
-        # into and it is correctly rejected as OUT_OF_ORDER -- not a bug, just an earlier-than-init
-        # timestamp. On a slow/loaded CI runner the two publish calls above can land within a few
-        # milliseconds of each other, so "wall clock now minus 80 ms" is not reliably later than
-        # init; wait out a fixed buffer well past the 80 ms offset first so the test's own timing
-        # never decides whether it passes (organizer audit, 2026-09-27: this exact race was
-        # observed failing under load).
-        buffer_deadline = time.monotonic() + 0.3
-        while time.monotonic() < buffer_deadline:
-            executor.spin_once(timeout_sec=0.02)
+        # `delayed` (80 ms behind "now", computed just below) must land safely after the
+        # estimator's own start time (its init stamp is the very first message's header, above) or
+        # there is no fixed-lag history left to insert it into and it is correctly rejected as
+        # OUT_OF_ORDER -- not a bug, just an earlier-than-init timestamp. On a slow/loaded CI
+        # runner the publish calls above can land within a few milliseconds of each other, so
+        # "wall clock now minus 80 ms" is not reliably later than init (organizer audit,
+        # 2026-09-27: this exact race was observed failing under load). Wait for the invariant
+        # itself -- at least 160 ms (double the 80 ms offset, for margin) actually elapsed since
+        # the first message's stamp -- rather than a fixed sleep that merely tends to be enough.
+        first_stamp = now.sec * 1_000_000_000 + now.nanosec
+        deadline = time.monotonic() + 2
+        while source.get_clock().now().nanoseconds < first_stamp + 160_000_000:
+            executor.spin_once(timeout_sec=0.01)
+            assert time.monotonic() < deadline
         delayed = source.get_clock().now().nanoseconds - 80_000_000
         wheel.header.stamp.sec, wheel.header.stamp.nanosec = divmod(delayed, 1_000_000_000)
         front.publish(wheel)

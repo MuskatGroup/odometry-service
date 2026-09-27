@@ -133,6 +133,7 @@ class ModelConfig:
     max_queue: int = 4096
     dedup_capacity: int = 8192
     use_wheels: bool = True
+    bootstrap_wheel_speed: bool = False
     robust: bool = True
     adapt_disturbance: bool = False
     disturbance_limit_mps2: float = 1.5
@@ -217,9 +218,11 @@ class AdaptiveOdometryEstimator:
         self,
         model_config: ModelConfig | None = None,
         grade_provider: Callable[[float], float] | None = None,
+        route_grade_provider: Callable[[str, float], float] | None = None,
     ):
         self.default_config = model_config or ModelConfig()
         self.grade_provider = grade_provider or (lambda _s: 0.0)
+        self.route_grade_provider = route_grade_provider
         self.reset()
 
     def reset(self):
@@ -254,6 +257,7 @@ class AdaptiveOdometryEstimator:
         self.hold = {}
         self.pending_reasons: set[str] = set()
         self.clamped = False
+        self.velocity_initialized = False
 
     def initialize(self, initial: InitialState, config=None):
         self.reset()
@@ -283,6 +287,7 @@ class AdaptiveOdometryEstimator:
             for index, value in enumerate(diag):
                 self.P[index][index] = value
         self.initialized = True
+        self.velocity_initialized = not self.config.bootstrap_wheel_speed
         self.last_accept = initial.stamp_ns
 
     def ingest_control(self, sample: ControlSample):
@@ -369,7 +374,10 @@ class AdaptiveOdometryEstimator:
 
     def _grade(self, s):
         try:
-            grade = float(self.grade_provider(s))
+            if self.route_grade_provider is not None:
+                grade = float(self.route_grade_provider(self.route_id, s)) if self.route_id else 0.0
+            else:
+                grade = float(self.grade_provider(s))
         except (TypeError, ValueError, OverflowError):
             grade = 0.0
         if not math.isfinite(grade):
@@ -465,12 +473,25 @@ class AdaptiveOdometryEstimator:
         previous = self.hold.get(sample.wheel_id)
         if previous is None or previous[0] != sample.speed_mps:
             self.hold[sample.wheel_id] = (sample.speed_mps, sample.stamp_ns)
+            self.frozen_ids.discard(sample.wheel_id)
             return False
-        elapsed = (sample.stamp_ns - previous[1]) / 1e9
+        if not self.config.detect_freeze:
+            return False
         expected = self._command(self.control or 0.0, self.x[1])[0] - self.config.c1 * self.x[1]
+        # A standstill supported by the model is the one exception to requiring a
+        # changed value: zero-speed sensors cannot change while the tram is stopped.
+        # Do not release a locked zero-speed channel while the model is still moving.
+        if sample.speed_mps == 0.0 and self.x[1] == 0.0 and expected <= 0.0:
+            self.frozen_ids.discard(sample.wheel_id)
+            return False
+        # Returning the controller to neutral is not evidence of sensor recovery.
+        # Otherwise the long-outage reacquisition path can trust the very same frozen
+        # value and pull both velocity and adapted disturbance towards a common fault.
+        if sample.wheel_id in self.frozen_ids:
+            return True
+        elapsed = (sample.stamp_ns - previous[1]) / 1e9
         return (
-            self.config.detect_freeze
-            and elapsed >= self.config.freeze_s
+            elapsed >= self.config.freeze_s
             and abs(expected) >= self.config.freeze_min_accel
         )
 
@@ -519,6 +540,18 @@ class AdaptiveOdometryEstimator:
             self.rejected_gnss_position += 1
             self.pending_reasons.add("GNSS_ROUTE_MISMATCH")
             return
+        if position and event.initialize and self.accepted_gnss_position == 0:
+            # Re-anchor at the event's timestamp without clearing control, wheel health, queued
+            # events or learned dynamics. This is not an innovation against an arbitrary s=0.
+            self.x[0] = event.s_m
+            for index in range(N):
+                self.P[0][index] = self.P[index][0] = 0.0
+            self.P[0][0] = event.variance_m2
+            self.route_id = event.route_id
+            self.accepted_gnss_position += 1
+            self.last_gnss = event.stamp_ns
+            self.pending_reasons.add("POSITION_ANCHORED")
+            return
         measurement = event.s_m if position else event.v_mps
         variance = event.variance_m2 if position else event.variance_m2ps2
         index = 0 if position else 1
@@ -545,6 +578,14 @@ class AdaptiveOdometryEstimator:
 
     def _process_group(self, stamp, events):
         self._predict_to(stamp)
+        if self.config.use_wheels and not self.velocity_initialized:
+            speeds = [e.speed_mps for e in events if isinstance(e, WheelSample) and e.valid]
+            if speeds:
+                # A moving recording has no zero-speed prior. The first usable wheel group
+                # supplies that prior; subsequent groups use normal robust gating.
+                self.x[1] = median(speeds)
+                self.velocity_initialized = True
+                self.pending_reasons.add("VELOCITY_INITIALIZED_FROM_WHEELS")
         candidates = []
         # GNSS corrections are collected, not applied inline: events of one timestamp already
         # arrive sorted control -> wheels -> velocity correction -> position correction

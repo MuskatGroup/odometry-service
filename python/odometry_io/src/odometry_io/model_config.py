@@ -174,3 +174,8 @@ def load_model_config(path, vehicle_id="default"):
     profile_path = resolve_model_profile(path, vehicle_id)
     document = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
     return build_model_config(document), document, profile_path
+
+
+# Alias: fix/runtime-validation independently arrived at the same fix (Lab loading a different,
+# incomplete model than production) under this name. Kept so either name works.
+model_config_from_document = build_model_config

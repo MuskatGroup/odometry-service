@@ -1,6 +1,6 @@
 FROM python:3.10-slim
 WORKDIR /workspace
 COPY python/ python/
-RUN pip install --no-cache-dir ./python/odometry_core ./python/odometry_io ./python/odometry_lab
+RUN pip install --no-cache-dir ./python/odometry_core ./python/odometry_geometry ./python/odometry_io ./python/odometry_lab
 COPY contracts/ contracts/
 ENTRYPOINT ["odometry-lab"]

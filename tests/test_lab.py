@@ -245,6 +245,54 @@ def test_model_profile_maps_to_estimator_config_with_drive_maps():
         config_from_profile({**document, "noise": {}})
 
 
+def test_model_profile_matches_the_exact_config_runtime_loads():
+    # Stronger version of the test above: instead of a synthetic document, load one of the real
+    # bundled profiles both ways and assert byte-for-byte equality with what production actually
+    # loads (fix/runtime-validation, organizer audit 2026-09-27 -- same regression, found twice).
+    from odometry_io import ModelProfileError, load_model_config
+
+    runtime_config, profile, _ = load_model_config(ROOT / "configs/models/30618.yaml")
+    config = config_from_profile(profile)
+    assert config == runtime_config
+    assert config.traction_map is not None and config.braking_map is not None
+    assert config.adapt_disturbance
+    with pytest.raises(ModelProfileError, match="Missing noise fields"):
+        config_from_profile({**profile, "noise": {}})
+
+
+def test_reference_window_cannot_cross_route_change():
+    rows = [{"stamp_ns": k * NS // 10, "v": 5.0, "s": k * 0.5,
+             "route": "outbound" if k < 200 else "inbound"} for k in range(400)]
+    assert rd.choose_window(rows, 30.0) is None
+
+
+def test_noise_calibration_uses_each_vehicle_model_and_training_subset(monkeypatch):
+    import sys
+
+    from odometry_lab import cli
+
+    profiles = [str(ROOT / f"configs/models/{vehicle}.yaml") for vehicle in (30618, 30639)]
+    monkeypatch.setattr(sys, "argv", ["odometry-lab", "calibrate-noise",
+                                    "--profile", profiles[0], "--profile", profiles[1]])
+    monkeypatch.setattr(cli, "load_split", lambda _: {
+        "identification": ["30618_train", "30639_train"], "duplicates": [],
+        "test": ["30618_test", "30639_test"],
+    })
+    calls, writes = [], []
+
+    def calibrate(bags, data, reference, base):
+        calls.append((bags, base))
+        return {"best": {"q_v": 1.0}, "baseline_objective_rmse_mps": 1.0}
+
+    monkeypatch.setattr(cli, "calibrate", calibrate)
+    monkeypatch.setattr(cli, "apply_to_profile", lambda path, result: writes.append(path))
+    cli.main()
+    assert [bags for bags, _ in calls] == [["30618_train"], ["30639_train"]]
+    assert all(config.traction_map is not None and config.adapt_disturbance for _, config in calls)
+    assert calls[0][1].tau_s != calls[1][1].tau_s
+    assert writes == profiles
+
+
 def test_real_bag_case_and_faulted_run_when_dataset_is_available():
     bag = ROOT / "dataset/data/30618_2050d396"
     reference = ROOT / "dataset/derived/reference/30618_2050d396.csv"

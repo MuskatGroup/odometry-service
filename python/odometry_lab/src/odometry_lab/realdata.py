@@ -103,7 +103,11 @@ def choose_window(reference: list[dict], length_s: float, max_gap_s: float = 0.5
     good = [r for r in reference if r["v"] is not None and r["s"] is not None]
     spans, begin = [], 0
     for i in range(1, len(good) + 1):
-        if i == len(good) or (good[i]["stamp_ns"] - good[i - 1]["stamp_ns"]) / NS > max_gap_s:
+        if (
+            i == len(good)
+            or good[i].get("route") != good[i - 1].get("route")
+            or (good[i]["stamp_ns"] - good[i - 1]["stamp_ns"]) / NS > max_gap_s
+        ):
             spans.append(good[begin:i])
             begin = i
     best, best_score = None, -1.0
@@ -166,6 +170,30 @@ def build_case(bag_dir: str | Path, reference_csv: str | Path, window_s: float =
         reference_coverage=len(rows) / max(1, len(in_window)),
         route_id=with_s[0]["route"],
         s0_m=s0,
+    )
+
+
+def run_real_events(case, events, model_config=None, estimator_name="adaptive-ekf"):
+    """Use map grade at the *estimated* position, never at the GNSS reference trajectory.
+
+    The window's initial position and speed are explicitly supplied by GNSS. ``never`` means
+    no subsequent GNSS corrections, not an uninitialized cold start.
+    """
+    from odometry_geometry import OutOfGraphError, PathGraph
+
+    graph = PathGraph.from_directory(REPO / "dataset/Pathgraph")
+
+    def grade(relative_s):
+        if case.route_id is None:
+            return 0.0
+        try:
+            return graph.pose_at(case.route_id, case.s0_m + relative_s).grade
+        except (KeyError, OutOfGraphError):
+            return 0.0
+
+    return run_events(
+        events, initial=case.initial, config=model_config, estimator_name=estimator_name,
+        hz=50, grade_provider=grade,
     )
 
 
@@ -348,9 +376,7 @@ def run_case(
         raise ValueError("GNSS correction modes require the adaptive-ekf estimator")
     corrections = correction_events(case, gnss_mode)
     events = events_for_run(case, scenario, start, end, gnss_mode)
-    frames, counts = run_events(
-        events, initial=case.initial, config=model_config, estimator_name=estimator_name, hz=50
-    )
+    frames, counts = run_real_events(case, events, model_config, estimator_name)
     faults = (
         []
         if kind == "none"

@@ -26,7 +26,8 @@ OBJECTIVE_SCENARIOS = ("none", "freeze-1", "slip-1", "dropout-1", "spike-1")
 # Kept as thin aliases over odometry_io's loader (the single source of truth for the model YAML
 # schema): the Lab used to parse a subset of the same document by hand, silently dropping the
 # traction/braking tables and adapt_disturbance, so a calibrated/benchmarked model was never the
-# one runtime actually loads (organizer audit, 2026-09-27).
+# one runtime actually loads (organizer audit, 2026-09-27 -- fix/runtime-validation independently
+# found and fixed the same gap under different names, kept as aliases in odometry_io).
 config_from_profile = build_model_config
 
 
