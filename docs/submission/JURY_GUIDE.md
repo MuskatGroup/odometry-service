@@ -24,11 +24,18 @@ API и web для работы алгоритма не нужны.
 
 ### В Docker
 
+Команды выполняются из корня репозитория в Bash. Контейнер запускается в фоне с
+именем, чтобы ноду и проигрыватель bag можно было открыть в двух терминалах:
+
 ```bash
+mkdir -p artifacts
 docker build -f infra/Dockerfile.ros -t reserve-odometry:submission .
-docker run --rm -it --cpus 2 --memory 512m \
-  -v /absolute/path/to/bags:/bags:ro \
-  reserve-odometry:submission bash
+docker run --rm -d --name reserve-odometry-check \
+  --cpus 2 --memory 512m \
+  -e ROS_DOMAIN_ID=76 \
+  -v "$(pwd)/tests/check-code/bags:/bags:ro" \
+  -v "$(pwd)/artifacts:/artifacts" \
+  reserve-odometry:submission sleep infinity
 ```
 
 Образ собирает workspace командой `colcon build`. Runtime-зависимости входят в
@@ -49,27 +56,29 @@ runtime-библиотеки из их канонических каталого
 
 ## 3. Запуск на rosbag
 
-В первом терминале:
+При Docker-запуске в первом терминале:
 
 ```bash
-source /opt/ros/humble/setup.bash
-source ros2_ws/install/setup.bash
-ros2 launch odometry_node reserve.launch.py \
-  vehicle_id:=30618 \
-  route_id:=shchukinskaya_to_tallinskaya \
-  s0:=76.70021572499135 \
-  initial_v_mps:=8.264238620430273 \
-  gnss_policy:=disabled \
-  use_sim_time:=true
+docker exec -it reserve-odometry-check bash -lc '
+  source /opt/ros/humble/setup.bash &&
+  source /workspace/ros2_ws/install/setup.bash &&
+  exec ros2 launch odometry_node reserve.launch.py \
+    vehicle_id:=30618 \
+    route_id:=shchukinskaya_to_tallinskaya \
+    s0:=76.70021572499135 \
+    initial_v_mps:=8.264238620430273 \
+    gnss_policy:=disabled \
+    use_sim_time:=true'
 ```
 
 Во втором терминале:
 
 ```bash
-source /opt/ros/humble/setup.bash
-source ros2_ws/install/setup.bash
-ros2 bag play /bags/30618_88aea4d9 --clock 100 --rate 1 \
-  --start-offset 230 --disable-keyboard-controls
+docker exec -it reserve-odometry-check bash -lc '
+  source /opt/ros/humble/setup.bash &&
+  source /workspace/ros2_ws/install/setup.bash &&
+  exec ros2 bag play /bags/30618_88aea4d9 --clock 100 --rate 1 \
+    --start-offset 230 --disable-keyboard-controls'
 ```
 
 Значения `route_id`, `s0` и `initial_v_mps` задают разрешённую начальную
@@ -84,10 +93,25 @@ Pathgraph, поэтому для воспроизводимого картогр
 ## 4. Ожидаемые топики
 
 ```bash
-ros2 topic hz /result/velocity
-ros2 topic hz /result/position
-ros2 topic echo /odometry/estimate --once
-ros2 topic echo /odometry/diagnostics --once
+docker exec -it reserve-odometry-check bash -lc '
+  source /opt/ros/humble/setup.bash &&
+  source /workspace/ros2_ws/install/setup.bash &&
+  ros2 topic hz /result/velocity'
+
+docker exec -it reserve-odometry-check bash -lc '
+  source /opt/ros/humble/setup.bash &&
+  source /workspace/ros2_ws/install/setup.bash &&
+  ros2 topic echo /result/position --once'
+
+docker exec -it reserve-odometry-check bash -lc '
+  source /opt/ros/humble/setup.bash &&
+  source /workspace/ros2_ws/install/setup.bash &&
+  ros2 topic hz /result/position'
+
+docker exec -it reserve-odometry-check bash -lc '
+  source /opt/ros/humble/setup.bash &&
+  source /workspace/ros2_ws/install/setup.bash &&
+  ros2 topic echo /odometry/diagnostics --once'
 ```
 
 | Топик | Тип | Содержание |
@@ -105,17 +129,26 @@ ros2 topic echo /odometry/diagnostics --once
 В образ входит валидатор, который запускает production-ноду, проигрыватель и
 независимый подписчик эталона:
 
+Сначала завершите ручные `ros2 launch` и `ros2 bag play` сочетанием `Ctrl+C` в их
+терминалах. Валидатор сам запускает оба процесса и не должен работать параллельно с ними.
+
 ```bash
-python3 /workspace/tools/validate_rosbag.py \
-  --bag /bags/30618_88aea4d9 \
-  --output /tmp/validation \
-  --vehicle-id 30618 \
-  --route-id shchukinskaya_to_tallinskaya \
-  --s0 76.70021572499135 \
-  --initial-v-mps 8.264238620430273 \
-  --start-offset 230 \
-  --rate 1
+docker exec -it reserve-odometry-check bash -lc '
+  source /opt/ros/humble/setup.bash &&
+  source /workspace/ros2_ws/install/setup.bash &&
+  python3 /workspace/tools/validate_rosbag.py \
+    --bag /bags/30618_88aea4d9 \
+    --output /artifacts/validation \
+    --vehicle-id 30618 \
+    --route-id shchukinskaya_to_tallinskaya \
+    --s0 76.70021572499135 \
+    --initial-v-mps 8.264238620430273 \
+    --start-offset 230 \
+    --rate 1'
 ```
+
+Каталог `artifacts/validation` должен отсутствовать или быть пустым. Для повторного
+прогона задайте новое имя каталога: существующие результаты намеренно не перезаписываются.
 
 Результаты:
 
@@ -130,10 +163,18 @@ python3 /workspace/tools/validate_rosbag.py \
 ## 6. Тесты
 
 ```bash
-python3 -m pytest -q tests
-RUN_ROS_TESTS=1 python3 -m pytest -q tests/integration
+docker exec -it reserve-odometry-check bash -lc '
+  source /opt/ros/humble/setup.bash &&
+  source /workspace/ros2_ws/install/setup.bash &&
+  python3 -m pytest -q /workspace/tests'
 ```
 
 Проверяются EKF, таблицы тяги/торможения, уклон, проскальзывание, freeze/dropout,
 reacquisition, fixed-lag обработка поздних данных, Pathgraph, реальные ROS-типы и
 обязательные выходные топики.
+
+После проверки:
+
+```bash
+docker stop reserve-odometry-check
+```
